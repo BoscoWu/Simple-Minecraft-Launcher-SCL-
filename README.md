@@ -1,6 +1,6 @@
 # Simple-Minecraft-Launcher-SCL-
 
-#可用命令列表:
+# 可用命令列表:
 #  install minecraft <version>                 - 下载指定版本游戏
 #  install <loader> <version>                  - 安装加载器 (fabric/forge/neoforge/quilt)
 #  install server <type> <version> <max> <min> - 下载服务器 (spigot/paper/purpur/fabric/forge)
