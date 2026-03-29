@@ -1,7 +1,7 @@
 # Simple-Minecraft-Launcher-SCL-
 📦 可用命令列表:
-  install minecraft <version>                 - 下载指定版本游戏
-  install <loader> <version>                  - 安装加载器 (fabric/forge/neoforge/quilt);
+  ##install minecraft <version>                 - 下载指定版本游戏
+  install <loader> <version>                  - 安装加载器 (fabric/forge/neoforge/quilt)
   install server <type> <version> <max> <min> - 下载服务器 (spigot/paper/purpur/fabric/forge)
   install java-<version>                      - 下载指定版本 Java (如 17,21)
   install <mod1, mod2,...>                    - 批量安装模组（逗号分隔）
