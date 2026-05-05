@@ -14,4 +14,10 @@
 - 🤖 **AI 助手**：调用 DeepSeek API，未知命令时智能回复（需自行配置 API Key  https://platform.deepseek.com/usage）
 - 💾 **便携式**：所有数据存储在启动器同目录的 `pyLauncher` 文件夹，可随意移动
 
+### 2026/5/1更新内容
 
+允许deepseek辅助用户进行启动器内置功能
+
+### 2026/5/5更新内容
+
+将微软登录部分改为设备代码流
