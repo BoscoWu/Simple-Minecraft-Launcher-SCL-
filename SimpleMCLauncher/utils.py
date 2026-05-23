@@ -22,7 +22,7 @@ MC_DIR = os.path.join(PYLAUNCHER_DIR, ".minecraft")
 SERVER_DIR = os.path.join(PYLAUNCHER_DIR, "servers")
 JAVA_DIR = os.path.join(PYLAUNCHER_DIR, "java")
 CONFIG_FILE = os.path.join(PYLAUNCHER_DIR, "launcher_config.json")
-VERSION_OF_LAUNCHER = "v3.0.2"
+VERSION_OF_LAUNCHER = "v3.0.3"
 REPO_OWNER = "BoscoWu"
 REPO_NAME = "Simple-Minecraft-Launcher-SCL-"
 
