@@ -22,7 +22,7 @@ jobs:
       - name: Build .app with PyInstaller
         run: |
           # 把 main.py 打包成 .app，--windowed 表示不要终端窗口
-          pyinstaller --name "你的启动器名字" --windowed --onedir main.py
+          pyinstaller --name "SimpleMCLauncher" --windowed --onedir SimpleMCLauncher/__main__.py
           
       - name: Create DMG
         run: |
