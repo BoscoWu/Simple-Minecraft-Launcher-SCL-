@@ -1,0 +1,77 @@
+name: Build Linux DEB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 关键：用 Linux 环境来构建
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable with PyInstaller
+        run: |
+          # Linux 下用 --onefile 生成单个可执行文件更常见
+          pyinstaller --name "simplemc-launcher" \
+            --windowed \
+            --onefile \
+            --paths . \
+            SimpleMCLauncher/__main__.py
+
+      - name: Prepare DEB package structure
+        run: |
+          # 创建 .deb 的标准目录结构
+          mkdir -p deb-package/DEBIAN
+          mkdir -p deb-package/usr/bin
+          mkdir -p deb-package/usr/share/applications
+          mkdir -p deb-package/usr/share/icons/hicolor/256x256/apps
+
+          # 复制可执行文件
+          cp dist/simplemc-launcher deb-package/usr/bin/
+
+          # 创建桌面快捷方式
+          cat > deb-package/usr/share/applications/simplemc-launcher.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Simple MC Launcher
+          Comment=极简 Minecraft 启动器
+          Exec=simplemc-launcher
+          Icon=simplemc-launcher
+          Terminal=false
+          Type=Application
+          Categories=Game;
+          EOF
+
+          # 如果有图标，复制进去
+          # cp icon.png deb-package/usr/share/icons/hicolor/256x256/apps/simplemc-launcher.png
+
+          # 创建控制文件（必须）
+          cat > deb-package/DEBIAN/control << 'EOF'
+          Package: simplemc-launcher
+          Version: 3.0.3
+          Section: games
+          Priority: optional
+          Architecture: amd64
+          Maintainer: BoscoWu
+          Description: 极简 Minecraft 启动器
+           一个功能完整的 Minecraft 启动器，支持模组管理、服务器开服、内网穿透和 AI 助手。
+          EOF
+
+      - name: Build DEB
+        run: |
+          dpkg-deb --build deb-package simplemc-launcher_3.0.3_amd64.deb
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-DEB
+          path: "*.deb"
