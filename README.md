@@ -12,7 +12,7 @@
 - 🔐 **微软登录**：支持正版微软账号设备代码流登录，自动刷新令牌
 - 🧩 **整合包导入**：支持导入 .mrpack 整合包（Modrinth 格式，自动下载模组与加载器）
 - ☕ **Java 管理**：自动下载所需 Java 运行时，或检测系统已安装的 Java
-- 🤖 **AI 助手（可选）**：调用 DeepSeek API（需自行配置 API Key，https://platform.deepseek.com/usage）
+- 🤖 **AI 助手（可选）**：调用 DeepSeek API（需自行配置 API Key，https://platform.deepseek.com/usage ）
 - 🪵 **日志系统**：自动写入 `pyLauncher/launcher.log`，便于排查问题
 - 💾 **便携式**：所有数据存储在启动器同目录的 `pyLauncher` 文件夹，可随意移动
 
