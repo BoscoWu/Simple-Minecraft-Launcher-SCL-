@@ -1,9 +1,12 @@
 # utils.py
-"""通用工具模块：路径常量、日志系统、网络下载、配置读写、Java 检查等。
+# Simple MC Launcher (https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-)
+# Copyright (C) 2026 BoscoWu
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
 
-本模块为启动器提供底层基础设施，所有函数都做了健壮性处理，
-避免因为网络波动或配置文件损坏而导致整个程序崩溃。
-"""
 import os
 import sys
 import json
