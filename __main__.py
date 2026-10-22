@@ -1,10 +1,16 @@
 # __main__.py
-"""程序入口：启动图形界面。"""
+# Simple MC Launcher (https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-)
+# Copyright (C) 2026 BoscoWu
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+
 import sys
 import os
 
 if getattr(sys, "frozen", False):
-    # 打包成 exe 后，把解包目录加入模块搜索路径
     sys.path.insert(0, os.path.join(sys._MEIPASS, "SimpleMCLauncher"))
 
 from . import utils  # noqa: E402
