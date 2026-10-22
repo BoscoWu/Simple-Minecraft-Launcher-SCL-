@@ -1,15 +1,12 @@
 # core.py
-"""启动器核心逻辑层。
+# Simple MC Launcher (https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-)
+# Copyright (C) 2026 BoscoWu
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
 
-本模块不依赖任何具体 GUI 框架，仅通过三个回调把运行状态反馈给界面层：
-
-- ``log_callback(message)``        输出一行日志
-- ``status_callback(message)``     更新当前状态文本
-- ``progress_callback(current, max)`` 更新进度（current/max 为字节或条数）
-
-所有网络、文件操作都做了健壮性处理（重试、超时、损坏恢复），
-避免因网络波动或配置文件损坏而导致程序崩溃。
-"""
 import os
 import sys
 import json
