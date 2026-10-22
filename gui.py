@@ -1,9 +1,12 @@
 # gui.py
-"""极简 MC 启动器图形界面（基于 CustomTkinter）。
+# Simple MC Launcher (https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-)
+# Copyright (C) 2026 BoscoWu
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
 
-界面完全通过按钮/下拉框/输入框交互，不再暴露命令行入口。
-所有耗时操作都在后台线程执行，并通过 after() 安全地更新界面。
-"""
 import os
 import threading
 import platform
