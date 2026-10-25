@@ -26,7 +26,7 @@ jobs:
         # 1. 创建一个干净的临时文件夹，只用来放 jar 包
         New-Item -ItemType Directory -Force -Path ./jpackage-input
         
-        # 2. 找到那个带有所有依赖的 shaded jar，并复制进去
+        # 2. 找到那个带有所有依赖的 shaded jar，并复制进去（过滤掉 original-）
         $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc|original-' } | Select-Object -First 1).Name
         Copy-Item "target\$jarName" -Destination "jpackage-input\$jarName"
         
