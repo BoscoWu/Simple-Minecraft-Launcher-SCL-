@@ -10,6 +10,7 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+    
     - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
@@ -22,9 +23,17 @@ jobs:
 
     - name: Package with jpackage (Windows)
       run: |
-        $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc' } | Select-Object -First 1).Name
-        echo "Found JAR: $jarName"
-        jpackage --type app-image --name SimpleMCL --input target --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
+        # 1. 创建一个干净的临时文件夹，只用来放 jar 包
+        New-Item -ItemType Directory -Force -Path ./jpackage-input
+        
+        # 2. 找到那个带有所有依赖的 shaded jar，并复制进去
+        $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc|original-' } | Select-Object -First 1).Name
+        Copy-Item "target\$jarName" -Destination "jpackage-input\$jarName"
+        
+        # 3. 使用干净的目录进行打包，避免路径过长
+        jpackage --type app-image --name SimpleMCL --input jpackage-input --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
+        
+        # 4. 压缩打包结果
         Compress-Archive -Path target/output/SimpleMCL -DestinationPath target/SimpleMCL-Windows.zip
 
     - name: Upload Windows Asset
