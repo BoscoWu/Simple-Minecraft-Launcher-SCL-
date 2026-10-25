@@ -2,11 +2,8 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "main", "master" ]
     tags:
       - 'v*'
-  pull_request:
-    branches: [ "main", "master" ]
 
 jobs:
   build-windows:
@@ -19,66 +16,20 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
         cache: maven
+    
     - name: Build with Maven
-      run: mvn clean package
+      run: mvn clean package -DskipTests
+
     - name: Package with jpackage (Windows)
       run: |
-        mvn dependency:copy-dependencies -DoutputDirectory=target/libs
         $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc' } | Select-Object -First 1).Name
-        jpackage --type app-image --name SimpleMCL -i target --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
+        echo "Found JAR: $jarName"
+        jpackage --type app-image --name SimpleMCL --input target --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
         Compress-Archive -Path target/output/SimpleMCL -DestinationPath target/SimpleMCL-Windows.zip
+
     - name: Upload Windows Asset
       uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
       with:
         files: target/SimpleMCL-Windows.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-        cache: maven
-    - name: Build with Maven
-      run: mvn clean package
-    - name: Package with jpackage (macOS)
-      run: |
-        JAR_NAME=$(ls target/*.jar | grep -v 'sources\|javadoc' | head -n 1)
-        jpackage --type dmg --name SimpleMCL -i target --main-jar $(basename $JAR_NAME) --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
-    - name: Upload macOS Asset
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: target/output/*.dmg
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-        cache: maven
-    - name: Build with Maven
-      run: mvn clean package
-    - name: Package with jpackage (Linux)
-      run: |
-        JAR_NAME=$(ls target/*.jar | grep -v 'sources\|javadoc' | head -n 1)
-        jpackage --type deb --name SimpleMCL -i target --main-jar $(basename $JAR_NAME) --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
-    - name: Upload Linux Asset
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: target/output/*.deb
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
