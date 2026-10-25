@@ -1,0 +1,6 @@
+target/
+.idea/
+*.iml
+pyLauncher/
+*.log
+.DS_Store
