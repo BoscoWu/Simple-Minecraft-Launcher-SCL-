@@ -24,24 +24,23 @@ jobs:
     - name: Build with Maven
       run: mvn clean package -DskipTests
 
-    - name: Package with jpackage (Windows)
+    - name: Package with jpackage (Windows EXE)
       run: |
-        # 1. 创建一个干净的临时文件夹，只用来放 jar 包
+        # 1. 创建干净的输入目录
         New-Item -ItemType Directory -Force -Path ./jpackage-input
         
-        # 2. 找到那个带有所有依赖的 shaded jar，并复制进去（过滤掉 original-）
+        # 2. 提取依赖包，并过滤掉 original
         $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc|original-' } | Select-Object -First 1).Name
         Copy-Item "target\$jarName" -Destination "jpackage-input\$jarName"
         
-        # 3. 使用干净的目录进行打包，避免路径过长
-        jpackage --type app-image --name SimpleMCL --input jpackage-input --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8"
-        
-        # 4. 压缩打包结果
-        Compress-Archive -Path target/output/SimpleMCL -DestinationPath target/SimpleMCL-Windows.zip
+        # 3. 用 jpackage 打包成 .exe 安装程序
+        # --win-shortcut 会在桌面生成快捷方式，--win-menu 会加入开始菜单
+        jpackage --type exe --name SimpleMCL --app-version 4.0.0 --input jpackage-input --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8" --win-shortcut --win-menu
 
-    - name: Upload Windows Asset
+    - name: Upload Windows EXE
       uses: softprops/action-gh-release@v1
       with:
-        files: target/SimpleMCL-Windows.zip
+        # 自动寻找 target/output 目录下的 .exe 并上传
+        files: target/output/*.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
