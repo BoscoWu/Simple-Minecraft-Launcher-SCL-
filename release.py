@@ -207,6 +207,53 @@ def check_tag_not_exists(tag: str) -> None:
     ok(f"Tag {tag} 可用")
 
 
+def check_up_to_date() -> None:
+    """确保本地分支与远端同步，避免推送阶段才失败。
+
+    远端领先时直接退出：此时打 tag 会让版本落后于远端代码，
+    必须先 pull/rebase 再发布。
+    """
+    info("检查与远端仓库的同步状态...")
+    branch = git("rev-parse", "--abbrev-ref", "HEAD") or "main"
+    if branch == "HEAD":
+        die("当前处于 detached HEAD 状态，请先切回分支再发布")
+
+    fetch = run(["git", "fetch", "origin", branch], check=False, capture=True)
+    if fetch.returncode != 0:
+        warn("无法连接远端仓库，跳过同步检查")
+        return
+
+    counts = git("rev-list", "--left-right", "--count", f"HEAD...origin/{branch}")
+    try:
+        ahead, behind = (int(x) for x in counts.split())
+    except ValueError:
+        warn("无法解析同步状态，跳过检查")
+        return
+
+    if behind > 0:
+        die(
+            f"本地分支落后远端 {behind} 个提交，请先同步后再发布：\n"
+            f"    git pull --rebase origin {branch}\n"
+            f"  （远端可能有你在网页上做的改动，例如删除文件/修改 README）"
+        )
+    if ahead > 0:
+        info(f"本地领先远端 {ahead} 个提交，将一并推送")
+    ok(f"同步状态正常（领先 {ahead}，落后 {behind}）")
+
+
+def check_remote_tag_not_exists(tag: str) -> None:
+    """检查远端是否已存在同名 tag（防止重复发布）。"""
+    result = run(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
+                 check=False, capture=True)
+    if result.returncode != 0:
+        warn("无法查询远端 tag（网络问题），将在推送阶段校验")
+        return
+    if (result.stdout or "").strip():
+        die(f"远端已存在 tag {tag}，请换一个版本号，或先删除远端 tag：\n"
+            f"    git push origin :refs/tags/{tag}")
+    ok(f"远端 tag {tag} 可用")
+
+
 # ---------------------------------------------------------------------------
 # 版本号同步
 # ---------------------------------------------------------------------------
@@ -320,8 +367,31 @@ def commit_and_tag(version: str, tag: str) -> None:
 def push(tag: str) -> None:
     info("推送到 GitHub...")
     branch = git("rev-parse", "--abbrev-ref", "HEAD") or "main"
-    run(["git", "push", "origin", branch])
-    run(["git", "push", "origin", tag])
+
+    result = run(["git", "push", "origin", branch], check=False, capture=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "rejected" in stderr or "fetch first" in stderr or "non-fast-forward" in stderr:
+            die(
+                "推送被拒绝：远端有你本地没有的提交。\n"
+                f"  请执行以下命令同步后重试：\n"
+                f"    git pull --rebase origin {branch}\n"
+                f"    git push origin {branch}\n"
+                f"    git push origin {tag}\n"
+                f"  （本地 tag {tag} 已创建，重新同步后可直接推送）"
+            )
+        die(f"推送分支失败:\n{stderr}")
+
+    result = run(["git", "push", "origin", tag], check=False, capture=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "already exists" in stderr:
+            die(
+                f"远端已存在 tag {tag}。若确认要覆盖：\n"
+                f"    git push --force origin {tag}"
+            )
+        die(f"推送 tag 失败:\n{stderr}")
+
     ok(f"已推送分支 {branch} 与 tag {tag}")
     info("GitHub Actions 将被触发，自动构建并上传 exe 到 Release")
 
@@ -459,6 +529,8 @@ def main() -> None:
     check_tools_result = check_tools()
     check_tag_not_exists(tag)
     if not args.no_upload:
+        check_up_to_date()
+        check_remote_tag_not_exists(tag)
         check_clean_worktree()
 
     update_pom_version(version)
