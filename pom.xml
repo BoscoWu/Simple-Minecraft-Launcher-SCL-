@@ -6,7 +6,7 @@
 
     <groupId>com.simplemc</groupId>
     <artifactId>simplemc-launcher</artifactId>
-    <version>4.0.4</version>
+    <version>4.0.5</version>
     <packaging>jar</packaging>
     <name>Simple MC Launcher</name>
     <description>极简 Minecraft 启动器 (Java 版)</description>
