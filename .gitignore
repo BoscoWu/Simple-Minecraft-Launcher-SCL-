@@ -12,6 +12,10 @@ target/output/
 *.exe
 !tools/*.exe
 
+# 打包工具本地缓存（7-Zip 等，由 release.py 自动下载）
+tools/_7zip/
+tools/sfx-config.txt
+
 # 发布脚本的本地凭据
 .github_token
 

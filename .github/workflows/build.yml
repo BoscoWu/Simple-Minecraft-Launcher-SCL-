@@ -60,15 +60,41 @@ jobs:
         Compress-Archive -Path target/output/SimpleMCL/* `
           -DestinationPath "target/SimpleMCL-$version-win64.zip" -Force
 
+        # 7. 生成单文件自解压 exe（双击即可运行，无需解压）
+        #    使用 7-Zip 的 SFX 模块：7z.sfx + payload.7z = 单个 exe
+        $sevenDir = "C:\Program Files\7-Zip"
+        if (-not (Test-Path "$sevenDir\7z.exe")) {
+          choco install 7zip -y --no-progress
+        }
+        $out = "target/SimpleMCL-$version-single.exe"
+        Push-Location target/output
+        Copy-Item ../../tools/sfx-config.txt . -ErrorAction SilentlyContinue
+        Set-Content -Path sfx-config.txt -Encoding UTF8 -Value @"
+;!@Install@!UTF-8!
+Title="Simple MC Launcher"
+RunProgram="SimpleMCL\\SimpleMCL.exe"
+GUIMode="2"
+;!@InstallEnd@!
+"@
+        & "$sevenDir\7z.exe" a -t7z -mx=5 "../_payload.7z" "SimpleMCL" "sfx-config.txt"
+        if ($LASTEXITCODE -ne 0) { throw "7z 压缩失败" }
+        $sfx = [IO.File]::ReadAllBytes("$sevenDir\7z.sfx")
+        $payload = [IO.File]::ReadAllBytes((Resolve-Path "../_payload.7z"))
+        $fs = [IO.File]::Create((Join-Path (Resolve-Path ../..) "target/SimpleMCL-$version-single.exe"))
+        $fs.Write($sfx, 0, $sfx.Length)
+        $fs.Write($payload, 0, $payload.Length)
+        $fs.Close()
+        Pop-Location
+        Remove-Item target/_payload.7z -ErrorAction SilentlyContinue
+
         Write-Host "产物:"
-        Get-ChildItem target/output/SimpleMCL/app | Select-Object Name, Length
-        Get-ChildItem target/*.zip | Select-Object Name, Length
+        Get-ChildItem target/*.zip, target/*-single.exe | Select-Object Name, Length
 
     - name: Upload Portable EXE
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          target/SimpleMCL-*-win64.zip
-          target/output/SimpleMCL/SimpleMCL.exe
+          target/SimpleMCL-*win64.zip
+          target/SimpleMCL-*-single.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
