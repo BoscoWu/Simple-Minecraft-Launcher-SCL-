@@ -4,3 +4,20 @@ target/
 pyLauncher/
 *.log
 .DS_Store
+
+# 构建与打包产物
+jpackage-input/
+dependency-reduced-pom.xml
+target/output/
+*.exe
+!tools/*.exe
+
+# 发布脚本的本地凭据
+.github_token
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/settings.json
