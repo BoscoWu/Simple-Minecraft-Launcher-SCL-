@@ -18,6 +18,7 @@ target/output/
 # Python
 __pycache__/
 *.pyc
+release.py
 
 # VS Code
 .vscode/settings.json

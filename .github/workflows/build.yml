@@ -24,23 +24,51 @@ jobs:
     - name: Build with Maven
       run: mvn clean package -DskipTests
 
-    - name: Package with jpackage (Windows EXE)
+    - name: Package with jpackage (Windows EXE, portable)
+      shell: pwsh
       run: |
         # 1. 创建干净的输入目录
         New-Item -ItemType Directory -Force -Path ./jpackage-input
-        
-        # 2. 提取依赖包，并过滤掉 original
-        $jarName = (Get-ChildItem target\*.jar | Where-Object { $_.Name -notmatch 'sources|javadoc|original-' } | Select-Object -First 1).Name
-        Copy-Item "target\$jarName" -Destination "jpackage-input\$jarName"
-        
-        # 3. 用 jpackage 打包成 .exe 安装程序
-        # --win-shortcut 会在桌面生成快捷方式，--win-menu 会加入开始菜单
-        jpackage --type exe --name SimpleMCL --app-version 4.0.0 --input jpackage-input --main-jar $jarName --main-class com.simplemc.launcher.Main --dest target/output --java-options "-Dfile.encoding=UTF-8" --win-shortcut --win-menu
 
-    - name: Upload Windows EXE
+        # 2. 取 shade 产物（排除 sources/javadoc/original-）
+        $jar = Get-ChildItem target\*.jar |
+          Where-Object { $_.Name -notmatch 'sources|javadoc|original-' } |
+          Sort-Object Length -Descending |
+          Select-Object -First 1
+        Copy-Item $jar.FullName -Destination "jpackage-input\$($jar.Name)"
+
+        # 3. 复制 JavaFX 平台 jar（含 native dll），否则运行时报「缺少 JavaFX 运行时组件」
+        $jfx = Get-ChildItem "$env:USERPROFILE\.m2\repository\org\openjfx" -Recurse -Filter "javafx-*-win.jar" |
+          Where-Object { $_.FullName -match '21\.0\.4' }
+        if (-not $jfx) { throw "未找到 JavaFX 平台 jar" }
+        $jfx | ForEach-Object { Copy-Item $_.FullName -Destination jpackage-input }
+        Write-Host "JavaFX 平台库: $($jfx.Name -join ', ')"
+
+        # 4. 取版本号
+        $version = (Select-String -Path pom.xml -Pattern '<version>([\d.]+)</version>' |
+          Select-Object -First 1).Matches.Groups[1].Value
+
+        # 5. app-image 免安装版（无需 WiX，产物可直接双击运行）
+        jpackage --type app-image --name SimpleMCL --app-version $version `
+          --input jpackage-input --main-jar $jar.Name `
+          --main-class com.simplemc.launcher.Launcher `
+          --dest target/output `
+          --java-options "-Dfile.encoding=UTF-8" `
+          --win-console
+
+        # 6. 压缩成 zip 便于分发
+        Compress-Archive -Path target/output/SimpleMCL/* `
+          -DestinationPath "target/SimpleMCL-$version-win64.zip" -Force
+
+        Write-Host "产物:"
+        Get-ChildItem target/output/SimpleMCL/app | Select-Object Name, Length
+        Get-ChildItem target/*.zip | Select-Object Name, Length
+
+    - name: Upload Portable EXE
       uses: softprops/action-gh-release@v1
       with:
-        # 自动寻找 target/output 目录下的 .exe 并上传
-        files: target/output/*.exe
+        files: |
+          target/SimpleMCL-*-win64.zip
+          target/output/SimpleMCL/SimpleMCL.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
