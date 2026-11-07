@@ -1,0 +1,64 @@
+name: Build Linux DEB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: |
+          # 注意：你的入口文件是 __main__.py
+          pyinstaller --name "SimpleMCLauncher" --windowed --onefile --collect-all customtkinter --collect-all minecraft_launcher_lib __main__.py
+
+      - name: Prepare DEB structure
+        run: |
+          mkdir -p deb-package/DEBIAN
+          mkdir -p deb-package/usr/bin
+          mkdir -p deb-package/usr/share/applications
+          
+          cp dist/SimpleMCLauncher deb-package/usr/bin/
+          
+          cat > deb-package/usr/share/applications/simplemc-launcher.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Simple MC Launcher
+          Comment=极简 Minecraft 启动器
+          Exec=SimpleMCLauncher
+          Icon=simplemc-launcher
+          Terminal=false
+          Type=Application
+          Categories=Game;
+          EOF
+
+          cat > deb-package/DEBIAN/control << 'EOF'
+          Package: simplemc-launcher
+          Version: 3.1.0
+          Section: games
+          Priority: optional
+          Architecture: amd64
+          Maintainer: BoscoWu
+          Description: 极简 Minecraft 启动器
+          EOF
+
+      - name: Build DEB
+        run: |
+          dpkg-deb --build deb-package simplemc-launcher_3.1.0_amd64.deb
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-DEB
+          path: "*.deb"
