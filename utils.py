@@ -26,9 +26,39 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 if getattr(sys, "frozen", False):
+    # 数据目录：放可执行文件旁边（便携，用户可见可备份）
     SCRIPT_DIR = os.path.dirname(sys.executable)
+    # 资源目录：PyInstaller onefile 解压到的临时目录
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", SCRIPT_DIR)
 else:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_DIR = SCRIPT_DIR
+
+
+def resource_path(relative: str) -> str:
+    """获取打包资源（图标、图片等）的绝对路径。
+
+    - 源码运行：相对项目目录
+    - PyInstaller onefile：优先 _MEIPASS，其次 exe 同级目录
+    """
+    candidates = [
+        os.path.join(RESOURCE_DIR, relative),
+        os.path.join(SCRIPT_DIR, relative),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), relative),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+def resource_bytes(relative: str) -> Optional[bytes]:
+    """读取打包资源的字节内容，不存在时返回 None。"""
+    try:
+        with open(resource_path(relative), "rb") as f:
+            return f.read()
+    except Exception:  # noqa: BLE001
+        return None
 
 PYLAUNCHER_DIR = os.path.join(SCRIPT_DIR, "pyLauncher")
 MC_DIR = os.path.join(PYLAUNCHER_DIR, ".minecraft")
@@ -37,23 +67,29 @@ JAVA_DIR = os.path.join(PYLAUNCHER_DIR, "java")
 CONFIG_FILE = os.path.join(PYLAUNCHER_DIR, "launcher_config.json")
 LOG_FILE = os.path.join(PYLAUNCHER_DIR, "launcher.log")
 
-VERSION_OF_LAUNCHER = "v3.1.0"
+VERSION_OF_LAUNCHER = "v4.1.2"
 REPO_OWNER = "BoscoWu"
 REPO_NAME = "Simple-Minecraft-Launcher-SCL-"
 
-# 更新检查：官网与 GitHub 双源（国内直连 GitHub API 常被阻断，走镜像）
+# 更新检查：国内镜像优先（直连 GitHub 常被阻断）
 SITE_URL = "https://simplemclauncher.xin"
-UPDATE_API_URLS = (
-    f"https://gh-proxy.com/https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
-    f"https://ghproxy.net/https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
-    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
-)
-# 下载加速前缀（按序尝试）
-UPDATE_DL_PREFIXES = (
+
+# API 镜像（2026-11 实测：仅 gh-proxy.com 可用，其余作为冗余保留）
+GH_API_MIRRORS = (
     "https://gh-proxy.com/",
+    "https://ghps.cc/",
     "https://ghproxy.net/",
-    "",
+    "https://ghfast.top/",
 )
+
+UPDATE_API_URLS = tuple(
+    m + f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
+    for m in GH_API_MIRRORS
+) + (f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",)
+
+# 下载加速前缀（按序尝试，最后一个是直连兜底）
+UPDATE_DL_PREFIXES = GH_API_MIRRORS + ("",)
+
 UPDATE_ASSET_NAME = "SimpleMCLauncher.exe"
 
 USER_AGENT = f"SimpleMCLauncher/{VERSION_OF_LAUNCHER}"
@@ -175,7 +211,8 @@ def download_file(
 
     total_size, supports_range = _probe_download(sess, url, headers, timeout)
 
-    if (supports_range and total_size and total_size > 1024 * 1024
+    # 只要支持 Range 且文件 >= 256KB，就用多线程分片下载
+    if (supports_range and total_size and total_size >= 256 * 1024
             and connections > 1):
         try:
             return _multi_part_download(
@@ -189,6 +226,76 @@ def download_file(
         sess, url, dest_path, callback, sha1,
         headers=headers, chunk_size=chunk_size,
         max_retries=max_retries, timeout=timeout)
+
+def download_file_mirrors(
+    urls: list,
+    dest_path: str,
+    callback: Optional[Callable[[int, int], None]] = None,
+    sha1: Optional[str] = None,
+    headers: Optional[dict] = None,
+    connections: int = 16,
+) -> str:
+    """从多个镜像并发分片下载同一个文件。
+
+    思路：把文件切成 N 段，每段轮流分配给不同镜像，
+    这样单镜像的限速被打散，整体速度显著提升。
+
+    :param urls: 镜像地址列表（第一个通常最快）
+    :return: dest_path
+    """
+    urls = [u for u in (urls or []) if u]
+    if not urls:
+        raise ValueError("没有可用的下载地址")
+    if len(urls) == 1:
+        return download_file(urls[0], dest_path, callback=callback, sha1=sha1,
+                             headers=headers, connections=connections)
+
+    sess = get_session()
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+    if os.path.isfile(dest_path) and sha1:
+        try:
+            if file_sha1(dest_path) == sha1:
+                return dest_path
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 逐个镜像探测大小与 Range 支持，收集可用的
+    usable = []
+    total_size = 0
+    for u in urls:
+        size, supports = _probe_download(sess, u, headers, (10, 20))
+        if supports and size > 0:
+            usable.append(u)
+            if not total_size:
+                total_size = size
+        if len(usable) >= 3:  # 最多用 3 个镜像
+            break
+
+    if not usable or total_size < 256 * 1024:
+        # 镜像都不支持 Range 或文件太小，退回逐个尝试
+        last = None
+        for u in urls:
+            try:
+                return download_file(u, dest_path, callback=callback, sha1=sha1,
+                                     headers=headers, connections=connections)
+            except Exception as e:  # noqa: BLE001
+                last = e
+        raise RuntimeError(f"所有镜像下载失败: {last}")
+
+    log_msg = f"[多镜像下载] 使用 {len(usable)} 个源，共 {total_size / 1024 / 1024:.1f} MB"
+    try:
+        import logging
+        logging.getLogger("launcher.utils").info(log_msg)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return _multi_part_download(
+        sess, usable[0], dest_path, total_size, callback, sha1,
+        headers=headers, chunk_size=1024 * 1024,
+        connections=connections, timeout=(15, 120), max_retries=3,
+        mirror_urls=usable)
+
 
 def _probe_download(sess, url, headers, timeout) -> Tuple[int, bool]:
     try:
@@ -213,14 +320,24 @@ def _probe_download(sess, url, headers, timeout) -> Tuple[int, bool]:
     return 0, False
 
 def _multi_part_download(sess, url, dest_path, total_size, callback, sha1,
-                         headers, chunk_size, connections, timeout, max_retries) -> str:
+                         headers, chunk_size, connections, timeout, max_retries,
+                         mirror_urls=None) -> str:
+    """分片并发下载。
+
+    :param mirror_urls: 可选的镜像列表；给出时每个分片轮流分配到不同镜像，
+                        把单镜像的限速打散，整体更快。
+    """
     import concurrent.futures as _futures
+
+    mirrors = [u for u in (mirror_urls or []) if u] or [url]
+    if url not in mirrors:
+        mirrors.insert(0, url)
 
     part_dir = dest_path + ".parts"
     os.makedirs(part_dir, exist_ok=True)
 
-    # 1MB 分片，并发数支持到 16
-    seg_count = min(connections, max(1, total_size // (1024 * 1024)))
+    # 按 256KB 切分片，最多 16 并发；小文件自动减少分片数
+    seg_count = min(connections, max(1, total_size // (256 * 1024)))
     seg_size = total_size // seg_count
     ranges = []
     for i in range(seg_count):
@@ -248,11 +365,14 @@ def _multi_part_download(sess, url, dest_path, total_size, callback, sha1,
             report(idx, want)
             return seg_path
 
+        # 该分片优先用的镜像，失败时轮换
+        seg_url = mirrors[idx % len(mirrors)]
+
         for attempt in range(max_retries):
             try:
                 req_h = dict(headers or {})
                 req_h["Range"] = f"bytes={start + have}-{end}"
-                with sess.get(url, headers=req_h, stream=True, timeout=timeout) as resp:
+                with sess.get(seg_url, headers=req_h, stream=True, timeout=timeout) as resp:
                     if resp.status_code not in (200, 206):
                         raise RuntimeError(f"HTTP {resp.status_code}")
                     mode = "ab" if have else "wb"
@@ -271,6 +391,8 @@ def _multi_part_download(sess, url, dest_path, total_size, callback, sha1,
                 have = os.path.getsize(seg_path)
             except Exception:
                 have = os.path.getsize(seg_path) if os.path.isfile(seg_path) else 0
+                # 换下一个镜像重试
+                seg_url = mirrors[(idx + attempt + 1) % len(mirrors)]
                 time.sleep(1 + attempt * 2)
         raise RuntimeError(f"分片 {idx} 下载失败")
 

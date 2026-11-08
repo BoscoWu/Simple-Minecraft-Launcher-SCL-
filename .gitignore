@@ -13,3 +13,13 @@ venv/
 *.tmp
 *.part
 build_and_push.py
+*.ico
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.svg
+*.icns
+icon.ico

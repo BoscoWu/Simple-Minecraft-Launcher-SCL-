@@ -22,6 +22,7 @@ except Exception:  # noqa: BLE001
 from core import LauncherCore, LOADER_NAMES
 from utils import (
     VERSION_OF_LAUNCHER, MC_DIR, SERVER_DIR, JAVA_DIR, LOG_FILE, get_logger,
+    resource_path,
 )
 
 log = get_logger("launcher.gui")
@@ -82,7 +83,17 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         self.title(APP_TITLE)
         self.geometry("1080x760")
         self.minsize(960, 680)
+        # 关键：先隐藏主窗口，避免与闪屏同时出现
+        try:
+            self.withdraw()
+        except Exception:  # noqa: BLE001
+            pass
         self._set_window_icon()
+        # 去掉系统标题栏，改用顶部栏自绘（含图标、标题、导航、窗口按钮）
+        try:
+            self.overrideredirect(True)
+        except Exception:  # noqa: BLE001
+            pass
 
         self.grid_rowconfigure(0, weight=0) 
         self.grid_rowconfigure(1, weight=1) 
@@ -90,8 +101,7 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
 
         self._init_state()
 
-        # ---- 先弹出启动闪屏，主界面在后台构建完成后再关闭 ----
-        self.withdraw()                 # 主窗口先隐藏
+        # ---- 先弹出启动闪屏，主界面在后台构建完成后再显示 ----
         self._splash = self._create_splash()
         self.update_idletasks()
 
@@ -124,20 +134,24 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         y = (sh - h) // 2
         sp.geometry(f"{w}x{h}+{x}+{y}")
 
+        # 闪屏也要设置图标，否则任务栏会显示默认图标
+        try:
+            if os.path.isfile(self.ICON_FILE):
+                sp.iconbitmap(self.ICON_FILE)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from tkinter import Toplevel as _TL  # noqa: F401
+            if getattr(self, "_icon_tk_ref", None) is not None:
+                sp.iconphoto(True, self._icon_tk_ref)
+        except Exception:  # noqa: BLE001
+            pass
+
         # 图标
         img_label = ctk.CTkLabel(sp, text="")
         img_label.pack(pady=(28, 10))
         try:
-            img = self._render_icon(96)
-            # 如果有 ico 文件，优先用更精细的版本
-            if os.path.isfile(self.ICON_FILE):
-                try:
-                    src = Image.open(self.ICON_FILE)
-                    src.size = (256, 256) if (256, 256) in src.info.get("sizes", []) else src.size
-                    src.load()
-                    img = src.convert("RGBA").resize((96, 96), Image.LANCZOS)
-                except Exception:  # noqa: BLE001
-                    pass
+            img = self._load_icon_image(96)
             sp_img = ctk.CTkImage(light_image=img, size=(96, 96))
             img_label.configure(image=sp_img)
             img_label._image_ref = sp_img
@@ -190,6 +204,8 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             self.focus_force()
         except Exception:  # noqa: BLE001
             pass
+        # 主窗口真正显示后再恢复任务栏（此时 ShowWindow 不会提前暴露主窗口）
+        self.after(50, self._restore_taskbar_presence)
 
     def _build_ui_deferred(self) -> None:
         """分步构建主界面，每步之间让出时间片刷新闪屏。"""
@@ -223,7 +239,8 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         self._switch_tab(0)
 
     # ---------------- 窗口图标 ----------------
-    ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+    # 打包后图标在 _MEIPASS 里，必须用 resource_path 定位
+    ICON_FILE = resource_path("icon.ico")
 
     # 16x16 像素设计网格：B=亮蓝 D=暗蓝 .=透明
     _ICON_GRID = (
@@ -246,19 +263,61 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
     )
 
     def _set_window_icon(self) -> None:
-        """设置窗口/任务栏图标：优先用 ico 文件，缺失时按网格绘制。"""
-        # 1. 优先使用随程序附带的 .ico
+        """设置窗口/任务栏图标，优先使用 icon.ico 本身。"""
+        # 1. Windows 任务栏归组用的 AppUserModelID（必须在创建窗口后尽早设置）
+        self._set_app_user_model_id()
+
+        # 2. iconbitmap：设置标题栏 + 任务栏的 ico
         try:
             if os.path.isfile(self.ICON_FILE):
                 self.iconbitmap(self.ICON_FILE)
         except Exception:  # noqa: BLE001
             pass
-        # 2. 同时用 iconphoto 设置（Tk 9 下对标题栏/任务栏更可靠）
+
+        # 3. iconphoto：从 icon.ico 读出多尺寸图，让任务栏/Alt-Tab 用同一图标
         try:
             from PIL import ImageTk
-            img = self._render_icon(64)
+            img = self._load_icon_image()
             self._icon_tk_ref = ImageTk.PhotoImage(img)
             self.iconphoto(True, self._icon_tk_ref)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def _load_icon_image(cls, size: int = 256):
+        """从 icon.ico 读取指定尺寸的图像；失败则回退到内置网格绘制。"""
+        try:
+            if os.path.isfile(cls.ICON_FILE):
+                ico = Image.open(cls.ICON_FILE)
+                sizes = sorted(ico.info.get("sizes", []), reverse=True)
+                # 选一个接近目标尺寸的档位，避免糊
+                target = None
+                for s in sizes:
+                    if s[0] >= size:
+                        target = s
+                if target is None and sizes:
+                    target = sizes[0]
+                if target:
+                    ico.size = target
+                    ico.load()
+                    img = ico.convert("RGBA")
+                    if img.size[0] != size:
+                        img = img.resize((size, size), Image.LANCZOS)
+                    return img
+        except Exception:  # noqa: BLE001
+            pass
+        return cls._render_icon(size)
+
+    def _set_app_user_model_id(self) -> None:
+        """Windows：设置 AppUserModelID，让任务栏使用本程序图标而非 python.exe。"""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            app_id = "BoscoWu.SimpleMCLauncher"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                ctypes.c_wchar_p(app_id))
         except Exception:  # noqa: BLE001
             pass
 
@@ -409,6 +468,171 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
     def _run_bg(self, fn, *args) -> None:
         threading.Thread(target=fn, args=args, daemon=True).start()
 
+    def _restore_taskbar_presence(self) -> None:
+        """去掉 WS_EX_TOOLWINDOW，加回 WS_EX_APPWINDOW，让窗口重新出现在任务栏。
+
+        Tk 在 overrideredirect(True) 下会给顶层窗口加上 WS_EX_TOOLWINDOW，
+        该样式会让窗口从任务栏和 Alt-Tab 里消失。
+        """
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOPMOST = 0x00000008
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+            SW_HIDE = 0
+            SW_SHOW = 5
+
+            hwnd = self.winfo_id()
+            root = user32.GetAncestor(hwnd, 2)  # GA_ROOT：真正的顶层窗口
+            if not root:
+                root = hwnd
+
+            ex = user32.GetWindowLongW(root, GWL_EXSTYLE)
+            new_ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            user32.SetWindowLongW(root, GWL_EXSTYLE, new_ex)
+
+            # 必须隐藏再显示，任务栏才会重新收录这个窗口
+            user32.ShowWindow(root, SW_HIDE)
+            user32.ShowWindow(root, SW_SHOW)
+            user32.SetWindowPos(
+                root, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+
+            # 重新应用一次图标，确保任务栏按钮显示 icon.ico
+            self._apply_taskbar_icon(root)
+
+            log.debug("已恢复任务栏显示: exstyle 0x%08X -> 0x%08X",
+                      ex & 0xFFFFFFFF, new_ex & 0xFFFFFFFF)
+        except Exception as e:  # noqa: BLE001
+            log.warning("恢复任务栏显示失败: %s", e)
+
+    def _apply_taskbar_icon(self, hwnd: int) -> None:
+        """用 WM_SETICON 直接把 icon.ico 的两个尺寸设到窗口上。"""
+        try:
+            import ctypes
+
+            if not os.path.isfile(self.ICON_FILE):
+                return
+            user32 = ctypes.windll.user32
+            WM_SETICON = 0x0080
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x00000010
+            LR_DEFAULTSIZE = 0x00000040
+
+            for size, which in ((32, ICON_BIG), (16, ICON_SMALL)):
+                hicon = user32.LoadImageW(
+                    None, ctypes.c_wchar_p(self.ICON_FILE), IMAGE_ICON,
+                    size, size, LR_LOADFROMFILE)
+                if hicon:
+                    user32.SendMessageW(
+                        hwnd, WM_SETICON, which, ctypes.c_void_p(hicon))
+        except Exception as e:  # noqa: BLE001
+            log.debug("设置任务栏图标失败: %s", e)
+
+    # ---------------- 自定义标题栏 ----------------
+    def _build_window_controls(self) -> None:
+        """右上角窗口按钮：— □ ×"""
+        ctrl = ctk.CTkFrame(self.topbar, fg_color="transparent")
+        ctrl.pack(side="right", padx=(0, 6))
+
+        btn_style = {
+            "width": 42, "height": 30,
+            "fg_color": "transparent",
+            "hover_color": COLOR_PRIMARY_LIGHT,
+            "text_color": "white",
+            "font": ctk.CTkFont(size=15),
+            "corner_radius": 4,
+        }
+
+        self.btn_min = ctk.CTkButton(ctrl, text="—", command=self._on_minimize, **btn_style)
+        self.btn_min.pack(side="left", padx=1)
+
+        self.btn_max = ctk.CTkButton(ctrl, text="□", command=self._on_toggle_max, **btn_style)
+        self.btn_max.pack(side="left", padx=1)
+
+        self.btn_close = ctk.CTkButton(
+            ctrl, text="×", width=42, height=30,
+            fg_color="transparent", hover_color="#e81123",
+            text_color="white", font=ctk.CTkFont(size=17),
+            corner_radius=4, command=self._on_close)
+        self.btn_close.pack(side="left", padx=1)
+
+        self._is_maximized = False
+
+    def _on_minimize(self) -> None:
+        try:
+            self.iconify()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_toggle_max(self) -> None:
+        try:
+            if self._is_maximized:
+                self.state("normal")
+                self._is_maximized = False
+            else:
+                self.state("zoomed")
+                self._is_maximized = True
+        except Exception:  # noqa: BLE001
+            # 部分平台不支持 zoomed，用几何尺寸模拟
+            try:
+                if self._is_maximized:
+                    self.geometry(f"{self._normal_size}+{self._normal_pos}")
+                else:
+                    self._normal_size = f"{self.winfo_width()}x{self.winfo_height()}"
+                    self._normal_pos = f"+{self.winfo_x()}+{self.winfo_y()}"
+                    sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+                    self.geometry(f"{sw}x{sh}+0+0")
+                self._is_maximized = not self._is_maximized
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---------------- 窗口拖动 ----------------
+    def _enable_window_drag(self) -> None:
+        """让顶部栏可拖动窗口（无原生标题栏时需要）。"""
+        drag = {"x": 0, "y": 0}
+
+        def start(event):
+            if self._is_maximized:
+                return
+            drag["x"] = event.x_root - self.winfo_x()
+            drag["y"] = event.y_root - self.winfo_y()
+
+        def move(event):
+            if self._is_maximized:
+                return
+            x = event.x_root - drag["x"]
+            y = event.y_root - drag["y"]
+            self.geometry(f"+{x}+{y}")
+
+        # CTkFrame 的实际绘制由内部 canvas 完成，必须绑到底层 canvas 才生效
+        targets = []
+        for widget in (self.topbar, self.topbar_logo):
+            targets.append(widget)
+            inner = getattr(widget, "_canvas", None)
+            if inner is not None:
+                targets.append(inner)
+
+        for w in targets:
+            try:
+                w.bind("<Button-1>", start, add="+")
+                w.bind("<B1-Motion>", move, add="+")
+                # 双击顶栏切换最大化
+                w.bind("<Double-Button-1>", lambda e: self._on_toggle_max(), add="+")
+            except Exception:  # noqa: BLE001
+                pass
+
     def _build_ui(self) -> None:
         self.configure(fg_color=COLOR_BG)
 
@@ -416,10 +640,22 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         self.topbar.grid(row=0, column=0, sticky="ew")
         self.topbar.grid_propagate(False)
 
+        # 图标 + 标题（放在 "Simple MC" 前面）
+        self.topbar_logo = ctk.CTkLabel(self.topbar, text="", width=30, height=30)
+        self.topbar_logo.pack(side="left", padx=(22, 8))
+        try:
+            icon_img = self._load_icon_image(32)
+            self._topbar_logo_ref = ctk.CTkImage(
+                light_image=icon_img, dark_image=icon_img, size=(26, 26))
+            self.topbar_logo.configure(image=self._topbar_logo_ref)
+        except Exception:  # noqa: BLE001
+            self.topbar_logo.configure(text="⚡", font=ctk.CTkFont(size=16),
+                                       text_color="white")
+
         logo = ctk.CTkLabel(
             self.topbar, text="Simple MC",
             font=ctk.CTkFont(size=20, weight="bold"), text_color="white")
-        logo.pack(side="left", padx=(20, 10))
+        logo.pack(side="left", padx=(0, 10))
 
         self.nav_frame = ctk.CTkFrame(self.topbar, fg_color="transparent")
         self.nav_frame.pack(side="left", padx=10)
@@ -433,9 +669,11 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             btn.pack(side="left", padx=4)
             self.nav_buttons.append(btn)
 
-        self.status_label = ctk.CTkLabel(
-            self.topbar, text="就绪", text_color="#dce8f5", font=ctk.CTkFont(size=12))
-        self.status_label.pack(side="right", padx=20)
+        # 窗口控制按钮（替代原生标题栏）
+        self._build_window_controls()
+
+        # 状态标签保留（隐藏），供内部 _set_status 调用，不再显示
+        self.status_label = ctk.CTkLabel(self.topbar, text="")
 
         self.main_container = ctk.CTkFrame(self, fg_color=COLOR_BG, corner_radius=0)
         self.main_container.grid(row=1, column=0, sticky="nsew")
@@ -458,6 +696,9 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         }
         for page in self.pages.values():
             page.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        # 无原生标题栏，启用顶栏拖动
+        self._enable_window_drag()
 
         self._build_drop_overlay()
         self._setup_drag_drop()
@@ -1058,8 +1299,15 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         self.server_list = ctk.CTkScrollableFrame(page, fg_color=COLOR_WHITE, height=110)
         self.server_list.pack(fill="x", padx=20, pady=(0, 8))
 
-        ctk.CTkLabel(page, text="服务器控制台",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=20)
+        # 控制台标题行：标题 + 清空日志按钮
+        console_head = ctk.CTkFrame(page, fg_color="transparent")
+        console_head.pack(fill="x", padx=20)
+        ctk.CTkLabel(console_head, text="服务器控制台",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+        ctk.CTkButton(console_head, text="清空日志", width=80, height=26,
+                      fg_color="#9aa0a6", hover_color="#7d8388",
+                      font=ctk.CTkFont(size=12),
+                      command=self._clear_server_log).pack(side="right")
         self.server_log_box = ctk.CTkTextbox(page, height=240)
         self.server_log_box.pack(fill="both", expand=True, padx=20, pady=(4, 6))
         self.server_log_box.configure(state="disabled")
@@ -1134,41 +1382,22 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         return page
 
     def _build_global_progress(self) -> None:
+        """底部统一进度条（不含日志显示区）。"""
         bar = ctk.CTkFrame(self.dl_content, fg_color=COLOR_WHITE, corner_radius=0)
         bar.pack(side="bottom", fill="x")
 
-        self.download_log = ctk.CTkTextbox(bar, height=76)
-        self.download_log.pack(fill="x", padx=16, pady=(10, 0))
-        self.download_log.configure(state="disabled")
-        self._log_visible = True
-
         self.download_progress = ctk.CTkProgressBar(bar, height=14)
-        self.download_progress.pack(fill="x", padx=16, pady=(8, 4))
+        self.download_progress.pack(fill="x", padx=16, pady=(10, 4))
         self.download_progress.set(0)
 
         row = ctk.CTkFrame(bar, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 8))
+        row.pack(fill="x", padx=16, pady=(0, 10))
         self.download_status = ctk.CTkLabel(
             row, text="就绪", font=ctk.CTkFont(size=12), text_color=COLOR_MUTED, anchor="w")
         self.download_status.pack(side="left", fill="x", expand=True)
         self.download_percent = ctk.CTkLabel(
             row, text="0%", font=ctk.CTkFont(size=13, weight="bold"), text_color="#0057a5")
         self.download_percent.pack(side="right")
-        
-        self.log_toggle_btn = ctk.CTkButton(
-            row, text="隐藏日志", width=76, height=22,
-            font=ctk.CTkFont(size=11), fg_color="#dceafc", text_color="#0057a5",
-            hover_color="#c9dcf5", command=self._toggle_log)
-        self.log_toggle_btn.pack(side="right", padx=(0, 10))
-
-    def _toggle_log(self) -> None:
-        if self._log_visible:
-            self.download_log.pack_forget()
-            self.log_toggle_btn.configure(text="显示日志")
-        else:
-            self.download_log.pack(fill="x", padx=16, pady=(10, 0), before=self.download_progress)
-            self.log_toggle_btn.configure(text="隐藏日志")
-        self._log_visible = not self._log_visible
 
     def _build_game_page(self) -> None:
         frame = self.dl_pages["游戏"]
@@ -2017,12 +2246,127 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             row.pack(fill="x", pady=2)
             ctk.CTkLabel(row, text=sid, anchor="w",
                          text_color=COLOR_TEXT).pack(side="left", fill="x", expand=True, padx=6)
+            # 注意：side="right" 时先 pack 的更靠右。
+            # 想要显示为 [启动][删除]，就要先 pack 删除，再 pack 启动。
+            ctk.CTkButton(row, text="删除", width=60, height=26,
+                          fg_color="#c94f4f", hover_color="#a83c3c",
+                          command=lambda s=sid: self._on_delete_server(s)).pack(
+                side="right", padx=4)
             ctk.CTkButton(row, text="启动", width=60, height=26,
-                          command=lambda s=sid: self._start_server(s)).pack(side="right", padx=4)
+                          command=lambda s=sid: self._start_server(s)).pack(
+                side="right", padx=(4, 0))
+
+    def _on_delete_server(self, server_id: str) -> None:
+        """确认后删除服务器。"""
+        import tkinter.messagebox as mb
+
+        size = self.core.server_size(server_id)
+        size_text = f"{size / 1024 / 1024:.1f} MB" if size else "未知"
+
+        # 判断该服务器是否正在运行
+        extra = ""
+        running_jar = getattr(self.core, "server_jar", "") or ""
+        if self.core.is_server_running() and running_jar:
+            srv_root = os.path.abspath(self.core.server_dir_of(server_id))
+            if os.path.abspath(running_jar).startswith(srv_root):
+                extra = "\n\n注意：该服务器正在运行，删除前会先停止它。"
+
+        msg = (
+            f"确定要删除服务器吗？\n\n"
+            f"服务器：{server_id}\n"
+            f"占用空间：{size_text}\n\n"
+            f"这会永久删除该服务器的所有文件，包括世界存档、插件与配置，"
+            f"操作不可恢复。{extra}"
+        )
+        try:
+            if not self.winfo_viewable():
+                self.deiconify()
+                self.update_idletasks()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if not mb.askyesno("删除服务器", msg, parent=self, icon="warning"):
+            return
+
+        self._append_server_log(f"> 正在删除服务器 {server_id}")
+        self._run_bg(self._delete_server_worker, server_id)
+
+    def _delete_server_worker(self, server_id: str) -> None:
+        ok = False
+        try:
+            ok = self.core.delete_server(server_id)
+        except Exception as e:  # noqa: BLE001
+            self.core.log(f"删除服务器异常: {e}")
+        self.after(0, lambda: self._on_delete_server_done(server_id, ok))
+
+    def _on_delete_server_done(self, server_id: str, ok: bool) -> None:
+        self._refresh_servers()
+        if ok:
+            self._append_server_log(f"> 服务器 {server_id} 已删除")
+            self._thread_safe_status(f"已删除 {server_id}")
+        else:
+            self._show_info_dialog(
+                "删除失败",
+                f"无法删除服务器 {server_id}。\n\n"
+                "常见原因：\n"
+                "• 服务器仍在运行，文件被占用\n"
+                "• 文件被其他程序打开\n\n"
+                "请先点击「停止」，稍后重试，或手动删除目录：\n"
+                f"{self.core.server_dir_of(server_id)}")
 
     def _start_server(self, server_id: str) -> None:
+        server_dir = os.path.join(str(SERVER_DIR), server_id)
+        if not os.path.isdir(server_dir):
+            self._show_info_dialog("启动服务器", f"服务器目录不存在：\n{server_dir}")
+            return
+
+        # 首次启动需先同意 EULA
+        if not self.core.server_eula_accepted(server_dir):
+            if not self._ask_eula(server_id, server_dir):
+                self._append_server_log("> 已取消启动（未同意 EULA）")
+                return
+
         self._append_server_log(f"> 启动服务器 {server_id}")
         self._run_bg(self.core.launch_server, server_id)
+
+    def _ask_eula(self, server_id: str, server_dir: str) -> bool:
+        """弹出 EULA 同意对话框；同意则写入 eula=true 并返回 True。"""
+        import tkinter.messagebox as mb
+
+        try:
+            if not self.winfo_viewable():
+                self.deiconify()
+                self.update_idletasks()
+        except Exception:  # noqa: BLE001
+            pass
+
+        msg = (
+            "首次启动服务器前，需要先同意 Minecraft 最终用户许可协议（EULA）。\n\n"
+            "    https://aka.ms/MinecraftEULA\n\n"
+            f"服务器：{server_id}\n\n"
+            "点击「同意」即表示你接受该协议，程序会写入 eula=true 并启动服务器。\n"
+            "点击「不同意」则不会启动。"
+        )
+        if not mb.askyesno("同意 Minecraft EULA", msg, parent=self):
+            return False
+
+        try:
+            self.core.set_server_eula(server_dir, True)
+            self._append_server_log("> 已同意 EULA，写入 eula=true")
+            self._thread_safe_log(f"已同意 {server_id} 的 EULA")
+            return True
+        except Exception as e:  # noqa: BLE001
+            self._show_info_dialog("写入 EULA 失败", f"无法写入 eula.txt：\n{e}")
+            return False
+
+    def _clear_server_log(self) -> None:
+        """清空服务器控制台日志显示（不影响服务器运行）。"""
+        try:
+            self.server_log_box.configure(state="normal")
+            self.server_log_box.delete("1.0", "end")
+            self.server_log_box.configure(state="disabled")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _send_server_command(self) -> None:
         cmd = self.server_cmd_entry.get().strip()

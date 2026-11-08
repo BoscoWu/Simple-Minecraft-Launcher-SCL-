@@ -13,6 +13,7 @@ import json
 import time
 import re
 import shutil
+import signal
 import zipfile
 import tempfile
 import threading
@@ -34,7 +35,8 @@ from utils import (
     REPO_OWNER, REPO_NAME, FRP_DIR, FRPC_CONFIG, FRPC_LOG, FRP_DOWNLOAD_URL,
     SITE_URL, UPDATE_API_URLS, UPDATE_DL_PREFIXES, UPDATE_ASSET_NAME,
     load_config, save_config, check_java, find_java_executable,
-    download_file, fetch_json, get_session, file_sha1, human_size,
+    download_file, download_file_mirrors, fetch_json, get_session,
+    file_sha1, human_size,
     setup_logging, get_logger, compare_versions,
 )
 
@@ -160,7 +162,13 @@ def _patch_neoforge_mirror() -> None:
 
         with _tempfile.TemporaryDirectory(prefix="minecraft-launcher-lib-") as tempdir:
             installer_path = os.path.join(tempdir, "neoforge-installer.jar")
-            _lib_download_file(self.get_installer_url(minecraft_version, loader_version), installer_path)
+            # 用本项目的多线程分片下载，而不是库内部的单线程实现
+            download_file(
+                self.get_installer_url(minecraft_version, loader_version),
+                installer_path,
+                callback=lambda c, t: callback.get("setProgress", empty)(c),
+                headers={"User-Agent": USER_AGENT},
+            )
 
             callback.get("setStatus", empty)("Running installer")
             command = [
@@ -211,9 +219,8 @@ class LauncherCore:
         self.config = load_config()
         self.game_process: Optional[subprocess.Popen] = None
         self.server_process: Optional[subprocess.Popen] = None
+        self.server_jar: str = ""
         self.frp_process: Optional[subprocess.Popen] = None
-        self.deepseek_api_key = ""
-        self.conversation_history: List[Dict[str, str]] = []
 
         # 统一任务进度状态
         self._task_total_steps = 0
@@ -228,7 +235,6 @@ class LauncherCore:
         self.java_message: str = ""
 
         self._ensure_directories()
-        self._load_deepseek_config()
 
     # ------------------------------------------------------------------
     # 基础工具
@@ -1768,6 +1774,83 @@ class LauncherCore:
             if os.path.isdir(os.path.join(SERVER_DIR, d))
         ])
 
+    def server_dir_of(self, server_id: str) -> str:
+        """返回服务器目录路径。"""
+        return os.path.join(SERVER_DIR, server_id or "")
+
+    def server_size(self, server_id: str) -> int:
+        """统计服务器目录占用字节数。"""
+        total = 0
+        root = self.server_dir_of(server_id)
+        if not os.path.isdir(root):
+            return 0
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+        return total
+
+    def delete_server(self, server_id: str) -> bool:
+        """删除服务器：先停止进程，再删除整个目录。"""
+        server_id = (server_id or "").strip()
+        if not server_id:
+            self.log("错误: 未指定服务器")
+            return False
+        # 防止路径穿越
+        if os.sep in server_id or "/" in server_id or server_id in (".", ".."):
+            self.log(f"错误的服务器名称: {server_id}")
+            return False
+
+        server_dir = self.server_dir_of(server_id)
+        if not os.path.isdir(server_dir):
+            self.log(f"服务器 {server_id} 不存在")
+            return False
+
+        try:
+            # 1. 如果正在运行，先停掉（避免文件被占用）
+            jar = self._find_server_jar(server_id)
+            if self.is_server_running():
+                running_jar = getattr(self, "server_jar", "") or ""
+                # 判断当前运行的是不是这个服务器
+                if not running_jar or not jar or \
+                        os.path.abspath(running_jar) == os.path.abspath(jar):
+                    self.log(f"服务器 {server_id} 正在运行，先停止...")
+                    self.stop_server()
+                else:
+                    self.log(f"当前运行的是另一个服务器，{server_id} 未在运行")
+            # 兜底：清理可能残留的 java 进程
+            saved_jar = getattr(self, "server_jar", "")
+            if jar:
+                self.server_jar = jar
+                self._kill_leftover_server_java()
+                self.server_jar = saved_jar
+
+            self.status(f"正在删除服务器 {server_id}...")
+            # 2. Windows 下文件句柄可能稍晚释放，重试几次
+            last_err = None
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(server_dir)
+                    last_err = None
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    time.sleep(0.4 + attempt * 0.4)
+            if last_err is not None:
+                raise last_err
+
+            self.log(f"服务器 {server_id} 已删除")
+            self.status("服务器已删除")
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.log(f"删除服务器失败: {e}")
+            self.log("提示: 请先停止服务器，或在资源管理器中手动删除目录")
+            self.status("删除失败")
+            log.exception("删除服务器失败")
+            return False
+
     def _find_server_jar(self, server_id: str) -> Optional[str]:
         server_dir = os.path.join(SERVER_DIR, server_id)
         if not os.path.isdir(server_dir):
@@ -1837,10 +1920,9 @@ class LauncherCore:
             if server_type != "forge":
                 self._write_server_defaults(server_dir, jar_name, max_mem, min_mem)
             else:
-                eula_path = os.path.join(server_dir, "eula.txt")
-                if not os.path.exists(eula_path):
-                    with open(eula_path, "w", encoding="utf-8") as f:
-                        f.write("eula=true\n")
+                # 不替用户同意 EULA，写成 false，首次启动时由界面询问
+                if not os.path.exists(os.path.join(server_dir, "eula.txt")):
+                    self.set_server_eula(server_dir, False)
 
             # 记录配置
             server_info = {
@@ -1859,6 +1941,9 @@ class LauncherCore:
             return True
         except Exception as e:  # noqa: BLE001
             self.log(f"下载服务器失败: {e}")
+            if server_type == "fabric":
+                self.log("提示: Fabric 服务端的「版本」应填 Minecraft 版本（如 1.21.1），"
+                         "加载器版本（如 0.20.1）是自动选择的。")
             self.status("服务器下载失败")
             log.exception("下载服务器失败")
             return False
@@ -1894,26 +1979,60 @@ class LauncherCore:
             url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{forge_version}/forge-{forge_version}-installer.jar"
             return url, f"forge-{forge_version}-installer.jar"
         if server_type == "fabric":
-            loader_info = fetch_json(f"https://meta.fabricmc.net/v2/versions/loader/{version}")
-            loader_version = loader_info[0]["loader"]["version"]
-            installer = fetch_json("https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml")
-            # 解析 latest
-            m = re.search(r"<latest>(.*?)</latest>", installer)
-            installer_version = m.group(1) if m else None
-            if not installer_version:
-                raise ValueError("无法获取 Fabric 安装器版本")
+            # 注意：该接口的 {version} 必须是 **Minecraft 版本**，不是加载器版本。
+            # 加载器版本形如 0.20.1，纯两段式数字；MC 版本形如 1.21.1 / 1.21。
+            is_mc_version = bool(re.fullmatch(r"1\.\d{1,2}(\.\d{1,2})?(-\w+)?", version))
+            if not is_mc_version:
+                raise ValueError(
+                    f"Fabric 服务端的版本号应为 Minecraft 版本（如 1.21.1），"
+                    f"而不是加载器版本（加载器会自动选择）。当前输入：{version}")
+
+            loader_info = fetch_json(
+                f"https://meta.fabricmc.net/v2/versions/loader/{version}")
+            if not loader_info:
+                raise ValueError(f"Fabric 不支持 Minecraft {version}")
+            # 优先挑选 stable 加载器
+            stable = [x for x in loader_info if x.get("loader", {}).get("stable")]
+            pick = (stable or loader_info)[0]
+            loader_version = pick["loader"]["version"]
+
+            # 安装器版本来自 maven-metadata.xml（XML，不能当 JSON 解析）
+            installer_version = self._fabric_installer_version()
+
+            # 生成“可直接运行的服务端启动包”必须带安装器版本段
             url = (f"https://meta.fabricmc.net/v2/versions/loader/{version}/"
                    f"{loader_version}/{installer_version}/server/jar")
-            return url, f"fabric-server-{version}.jar"
+            self.log(f"Fabric 加载器版本: {loader_version}")
+            return url, f"fabric-server-mc.{version}-loader.{loader_version}.jar"
         raise ValueError(f"无法处理服务器类型: {server_type}")
+
+    def _fabric_installer_version(self) -> str:
+        """从 Maven 元数据（XML）中取 Fabric 安装器最新版本。"""
+        try:
+            resp = get_session().get(
+                "https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml",
+                timeout=20, headers={"User-Agent": USER_AGENT})
+            resp.raise_for_status()
+            text = resp.text
+            m = re.search(r"<release>(.*?)</release>", text)
+            if not m:
+                m = re.search(r"<latest>(.*?)</latest>", text)
+            if m:
+                return m.group(1).strip()
+        except Exception as e:  # noqa: BLE001
+            log.warning("获取 Fabric 安装器版本失败: %s", e)
+        # 兜底：使用一个已知可用的安装器版本
+        return "1.0.1"
 
     def _write_server_defaults(self, server_dir: str, jar_name: str,
                                max_mem: str, min_mem: str) -> None:
-        # eula.txt（服务器首次启动需要同意）
+        # eula.txt：不替用户同意协议，写成 false，首次启动时由界面询问
         eula_path = os.path.join(server_dir, "eula.txt")
         if not os.path.exists(eula_path):
             with open(eula_path, "w", encoding="utf-8") as f:
-                f.write("eula=true\n")
+                f.write("# By changing the setting below to TRUE you are indicating "
+                        "your agreement to our EULA (https://aka.ms/MinecraftEULA).\n")
+                f.write("eula=false\n")
         # 启动脚本
         if os.name == "nt":
             bat = os.path.join(server_dir, "start.bat")
@@ -1926,6 +2045,35 @@ class LauncherCore:
             with open(sh, "w", encoding="utf-8") as f:
                 f.write("#!/bin/sh\n")
                 f.write(f"java -Xmx{max_mem} -Xms{min_mem} -jar {jar_name} nogui\n")
+
+    # ---------------- EULA ----------------
+    @staticmethod
+    def server_eula_accepted(server_dir: str) -> bool:
+        """读取 eula.txt，判断用户是否已同意 EULA。"""
+        path = os.path.join(server_dir, "eula.txt")
+        if not os.path.isfile(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    s = line.strip().lower()
+                    if s.startswith("#") or "=" not in s:
+                        continue
+                    if s.replace(" ", "").startswith("eula="):
+                        return s.split("=", 1)[1].strip() == "true"
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    @staticmethod
+    def set_server_eula(server_dir: str, accept: bool) -> None:
+        """写入 eula.txt（accept=True 表示用户已同意）。"""
+        os.makedirs(server_dir, exist_ok=True)
+        path = os.path.join(server_dir, "eula.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# By changing the setting below to TRUE you are indicating "
+                    "your agreement to our EULA (https://aka.ms/MinecraftEULA).\n")
+            f.write(f"eula={'true' if accept else 'false'}\n")
 
     def launch_server(self, server_id: str, nogui: bool = False) -> None:
         server_id = (server_id or "").strip()
@@ -1957,21 +2105,26 @@ class LauncherCore:
 
         java = self._get_java_executable()
 
-        # Forge 服务器使用安装器生成的启动脚本
-        if run_script is not None:
-            if os.name == "nt":
-                command = ["cmd", "/c", run_script]
-            else:
-                command = ["sh", run_script]
+        # 统一直接用 java 启动，避免经 cmd 包裹导致杀不掉 java 子进程
+        jar_path = os.path.abspath(jar) if jar else ""
+        if jar_path and os.path.isfile(jar_path):
+            command = [java, f"-Xmx{max_mem}", f"-Xms{min_mem}",
+                       "-jar", jar_path, "nogui"]
+        elif run_script is not None:
+            # 兜底：确实没有 jar 时才走脚本
+            command = (["cmd", "/c", run_script] if os.name == "nt"
+                       else ["sh", run_script])
         else:
-            command = [java, f"-Xmx{max_mem}", f"-Xms{min_mem}", "-jar", os.path.basename(jar)]
-            if nogui or "installer" not in os.path.basename(jar).lower():
-                command.append("nogui")
+            self.log("错误: 找不到服务器 jar")
+            return
 
         self.log(f"正在启动服务器 {server_id} ...")
         self.status("正在启动服务器...")
         try:
-            creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            creation_flags = 0
+            if os.name == "nt":
+                # CREATE_NO_WINDOW：不弹黑框
+                creation_flags = subprocess.CREATE_NO_WINDOW
             process = subprocess.Popen(
                 command,
                 cwd=server_dir,
@@ -1985,6 +2138,8 @@ class LauncherCore:
                 creationflags=creation_flags,
             )
             self.server_process = process
+            self.server_jar = jar_path
+            self.log(f"服务器进程已启动 (PID {process.pid})")
             threading.Thread(target=self._read_server_log, args=(process,), daemon=True).start()
         except Exception as e:  # noqa: BLE001
             self.log(f"启动服务器失败: {e}")
@@ -2028,29 +2183,181 @@ class LauncherCore:
         return self.server_process is not None and self.server_process.poll() is None
 
     def stop_server(self) -> None:
-        if self.server_process is None:
+        """停止服务器：先尝试 stop 命令优雅关闭，再强制结束 java 进程树。"""
+        proc = self.server_process
+        if proc is None:
             self.log("没有正在运行的服务器进程")
+            # 兜底：按命令扫描残留的 java 进程
+            self._kill_leftover_server_java()
             return
-        if self.server_process.poll() is not None:
+        if proc.poll() is not None:
             self.server_process = None
             return
+
+        pid = proc.pid
+        self.server_log("[系统] 正在停止服务器...")
+        self.log(f"正在停止服务器 (PID {pid})...")
+
+        # 1) 尝试用 stop 命令让 MC 正常保存并关闭（最多等 8 秒）
+        graceful = False
         try:
-            # 尝试通过 stdin 发送 stop 命令优雅关闭
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.write("stop\n")
+                proc.stdin.flush()
+                proc.wait(timeout=8)
+                graceful = True
+                self.log("服务器已通过 stop 命令正常关闭")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 2) 没关掉就强制结束
+        if not graceful:
+            self._kill_process_tree(pid)
             try:
-                self.server_process.stdin.write("stop\n")
-                self.server_process.stdin.flush()
-                self.server_process.wait(timeout=10)
+                proc.wait(timeout=5)
             except Exception:  # noqa: BLE001
-                self.server_process.terminate()
+                pass
+
+        # 3) 清理残留（按 jar 名匹配 java 进程，防止子进程存活）
+        self._kill_leftover_server_java()
+
+        self.server_process = None
+        self.server_log("[系统] 服务器已停止")
+        self.log("服务器已停止")
+        self.status("服务器已停止")
+
+    def _kill_process_tree(self, pid: int) -> None:
+        """强制结束进程及其所有子进程。"""
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                self.log(f"已强制结束进程树 (PID {pid})")
+            else:
+                # POSIX：先杀进程组，再杀进程
                 try:
-                    self.server_process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.server_process.kill()
-            self.log("服务器已停止")
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception:  # noqa: BLE001
+                    os.kill(pid, signal.SIGKILL)
+                self.log(f"已强制结束进程 (PID {pid})")
         except Exception as e:  # noqa: BLE001
-            self.log(f"停止服务器时出错: {e}")
-        finally:
-            self.server_process = None
+            log.warning("强制结束进程失败: %s", e)
+            # 最后兜底：用 Popen 自己的 kill
+            try:
+                if self.server_process is not None:
+                    self.server_process.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _kill_leftover_server_java(self) -> None:
+        """按服务器 jar 名，清理可能残留的 java 进程。"""
+        jar = getattr(self, "server_jar", "") or ""
+        if not jar or os.name != "nt":
+            return
+        pids = self._find_java_pids_by_jar(jar)
+        killed = 0
+        for pid in pids:
+            # 双保险：确认确实是 java 进程，避免误杀
+            if not self._is_java_pid(pid):
+                continue
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                killed += 1
+            except Exception:  # noqa: BLE001
+                continue
+        if killed:
+            self.log(f"已清理 {killed} 个残留的服务器 java 进程")
+
+    @staticmethod
+    def _find_java_pids_by_jar(jar_path: str) -> List[str]:
+        """查找以该 jar 启动的 java 进程 PID。
+
+        做法：把 java.exe 的 ProcessId + CommandLine 原样取回，
+        在 Python 侧精确判断，避免 PowerShell 过滤表达式误匹配。
+        """
+        pids: List[str] = []
+        self_pid = str(os.getpid())
+        if not jar_path:
+            return pids
+        jar_full = os.path.abspath(jar_path).lower()
+        jar_name = os.path.basename(jar_full)
+
+        def collect(raw: str) -> None:
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                pid, _, cmd = line.partition("|")
+                pid = pid.strip()
+                if not pid.isdigit() or pid == self_pid:
+                    continue
+                low = cmd.lower()
+                # 必须含 -jar，且 jar 路径或文件名匹配
+                if "-jar" not in low:
+                    continue
+                if jar_full not in low and jar_name not in low:
+                    continue
+                if pid not in pids:
+                    pids.append(pid)
+
+        # 方式一：PowerShell 取原始命令行
+        try:
+            ps = (
+                "$ErrorActionPreference='SilentlyContinue';"
+                "Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" | "
+                "ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"
+            )
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, timeout=25,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ).stdout or ""
+            collect(out)
+            if pids:
+                return pids
+        except Exception as e:  # noqa: BLE001
+            log.debug("PowerShell 查询 java 进程失败: %s", e)
+
+        # 方式二：wmic（旧系统）
+        try:
+            out = subprocess.run(
+                ["wmic", "process", "where", "name='java.exe'",
+                 "get", "ProcessId,CommandLine"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ).stdout or ""
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or "-jar" not in line.lower():
+                    continue
+                if jar_full not in line.lower() and jar_name not in line.lower():
+                    continue
+                m = re.findall(r"(\d+)\s*$", line)
+                if m and m[-1] != self_pid and m[-1] not in pids:
+                    pids.append(m[-1])
+        except Exception:  # noqa: BLE001
+            pass
+        return pids
+
+    @staticmethod
+    def _is_java_pid(pid: str) -> bool:
+        """确认该 PID 确实是一个 java 进程，避免误杀。"""
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ).stdout or ""
+            return "java.exe" in out.lower()
+        except Exception:  # noqa: BLE001
+            return False
 
     def server_console(self, server_id: str, nogui: bool = False) -> None:
         self.launch_server(server_id, nogui)
@@ -2357,12 +2664,35 @@ class LauncherCore:
 
         tag = release.get("tag_name", "latest")
         self.log(f"开始下载 {name}（{human_size(size)}）...")
+        self.log(f"镜像源: {len(UPDATE_DL_PREFIXES)} 个（优先国内）")
         self.status("正在下载更新...")
         self.begin_task(1, f"下载更新 {tag}")
 
-        last_err = None
+        # 组装所有镜像 URL，交给多镜像并发下载
+        mirror_urls = []
         for prefix in UPDATE_DL_PREFIXES:
             full = prefix + url if prefix else url
+            if full not in mirror_urls:
+                mirror_urls.append(full)
+
+        try:
+            download_file_mirrors(
+                mirror_urls, dest,
+                callback=self.progress,
+                headers={"User-Agent": USER_AGENT},
+                connections=16,
+            )
+            self.end_task()
+            self.log(f"更新包已下载: {dest}")
+            self.status("更新下载完成")
+            return dest
+        except Exception as e:  # noqa: BLE001
+            log.warning("多镜像下载失败，逐个重试: %s", e)
+            self.log(f"多镜像下载失败，逐个源重试...")
+
+        # 兜底：逐源单线程重试
+        last_err = None
+        for full in mirror_urls:
             try:
                 download_file(full, dest, callback=self.progress,
                               headers={"User-Agent": USER_AGENT},
@@ -2490,74 +2820,6 @@ del "%~f0" >nul 2>&1
         self.log("请手动替换旧版本文件。")
         self.status("请手动完成替换")
         return False
-
-    # ------------------------------------------------------------------
-    # DeepSeek（隐藏的后端 AI 助手，可选）
-    # ------------------------------------------------------------------
-    def _load_deepseek_config(self) -> None:
-        config_path = os.path.join(PYLAUNCHER_DIR, "deepseek_config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.deepseek_api_key = (data or {}).get("api_key", "")
-            except Exception as e:  # noqa: BLE001
-                log.warning("加载 DeepSeek 配置失败: %s", e)
-                self.deepseek_api_key = ""
-
-    def set_api_key(self, key: str) -> None:
-        key = (key or "").strip()
-        self.deepseek_api_key = key
-        config_path = os.path.join(PYLAUNCHER_DIR, "deepseek_config.json")
-        try:
-            data = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            data["api_key"] = key
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            self.log("DeepSeek API Key 已保存")
-        except Exception as e:  # noqa: BLE001
-            self.log(f"保存 API Key 失败: {e}")
-        self.conversation_history = []
-
-    def chat_with_deepseek(self, user_message: str) -> str:
-        """与 DeepSeek 进行简单对话（无工具调用，隐藏后端）。"""
-        if not self.deepseek_api_key:
-            return "DeepSeek AI 未启用（未配置 API Key）"
-        if not self.conversation_history:
-            self.conversation_history.append({
-                "role": "system",
-                "content": "你是一个 Minecraft 启动器助手，用简体中文简洁地回答用户问题。",
-            })
-        self.conversation_history.append({"role": "user", "content": user_message})
-        if len(self.conversation_history) > 20:
-            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[-19:]
-        try:
-            resp = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.deepseek_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"model": "deepseek-chat", "messages": self.conversation_history,
-                      "stream": False},
-                timeout=60,
-            )
-            resp.raise_for_status()
-            message = resp.json()["choices"][0]["message"]
-            reply = message.get("content", "")
-            if reply:
-                self.conversation_history.append({"role": "assistant", "content": reply})
-            return reply or "（无回复）"
-        except Exception as e:  # noqa: BLE001
-            log.warning("DeepSeek 对话失败: %s", e)
-            return f"与 DeepSeek 对话失败: {e}"
-
-    def clear_history(self) -> None:
-        self.conversation_history = []
-        self.log("对话历史已清空")
 
     # ------------------------------------------------------------------
     # 关闭
