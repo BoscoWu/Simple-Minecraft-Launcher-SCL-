@@ -22,7 +22,7 @@ jobs:
       - name: Build executable
         run: |
           # 注意：你的入口文件是 __main__.py
-          pyinstaller --name "SimpleMCLauncher" --windowed --onefile --collect-all customtkinter --collect-all minecraft_launcher_lib __main__.py
+          pyinstaller --name "SimpleMCLauncher" --windowed --onefile --paths=. --hidden-import=utils --hidden-import=core --hidden-import=gui --collect-all customtkinter --collect-all minecraft_launcher_lib __main__.py
 
       - name: Prepare DEB structure
         run: |
