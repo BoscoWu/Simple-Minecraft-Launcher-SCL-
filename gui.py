@@ -1,20 +1,4 @@
 # gui.py
-# Simple MC Launcher (https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-)
-# Copyright (C) 2026 BoscoWu
-#
-# This library is free software; you can redistribute it and/or
-# modify it under the terms of the GNU Lesser General Public
-# License as published by the Free Software Foundation; either
-# version 2.1 of the License, or (at your option) any later version.
-
-"""极简 MC 启动器图形界面。
-
-界面结构对齐 Java 版：
-    顶部导航栏（启动/版本/模组/服务器 + 返回按钮）
-    左侧边栏（登录按钮 / 头像 / 玩家名 / 启动游戏 / 实例选择与设置）
-    右侧内容区（各功能页 + 独立下载页）
-"""
-
 import io
 import os
 import threading
@@ -22,6 +6,7 @@ import time
 import urllib.request
 import webbrowser
 from tkinter import filedialog
+
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw
@@ -35,7 +20,12 @@ except Exception:  # noqa: BLE001
     _DND_AVAILABLE = False
 
 from core import LauncherCore, LOADER_NAMES
-from utils import VERSION_OF_LAUNCHER, MC_DIR, SERVER_DIR, JAVA_DIR, LOG_FILE
+from utils import (
+    VERSION_OF_LAUNCHER, MC_DIR, SERVER_DIR, JAVA_DIR, LOG_FILE, get_logger,
+)
+
+log = get_logger("launcher.gui")
+
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
@@ -61,7 +51,9 @@ MODRINTH_CATEGORIES = {
 }
 MODRINTH_WORLD_QUERY = "world"
 
+# 全局图标缓存，防止图片被 Python 垃圾回收导致变白
 _ICON_CACHE = {}
+_CTK_IMAGES = {}
 
 def get_grass_icon():
     if "grass_local" in _ICON_CACHE:
@@ -90,13 +82,19 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         self.title(APP_TITLE)
         self.geometry("1080x760")
         self.minsize(960, 680)
+        self._set_window_icon()
 
         self.grid_rowconfigure(0, weight=0) 
         self.grid_rowconfigure(1, weight=1) 
         self.grid_columnconfigure(0, weight=1)
 
         self._init_state()
-        
+
+        # ---- 先弹出启动闪屏，主界面在后台构建完成后再关闭 ----
+        self.withdraw()                 # 主窗口先隐藏
+        self._splash = self._create_splash()
+        self.update_idletasks()
+
         self.core = LauncherCore(
             log_callback=self._thread_safe_log,
             status_callback=self._thread_safe_status,
@@ -106,13 +104,184 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
 
         self.after(80, self._flush_log_queue)
 
-        self._build_ui()
-        self._refresh_versions()
-        self._refresh_servers()
-        self._update_player_display()
+        # 分步构建主界面，让闪屏有机会刷新
+        self.after(60, self._build_ui_deferred)
+
+    # ---------------- 启动闪屏 ----------------
+    SPLASH_W = 380
+    SPLASH_H = 260
+
+    def _create_splash(self):
+        """创建居中显示的无边框启动画面。"""
+        sp = ctk.CTkToplevel(self)
+        sp.overrideredirect(True)          # 无标题栏
+        sp.attributes("-topmost", True)
+        sp.configure(fg_color=COLOR_WHITE)
+
+        w, h = self.SPLASH_W, self.SPLASH_H
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        sp.geometry(f"{w}x{h}+{x}+{y}")
+
+        # 图标
+        img_label = ctk.CTkLabel(sp, text="")
+        img_label.pack(pady=(28, 10))
+        try:
+            img = self._render_icon(96)
+            # 如果有 ico 文件，优先用更精细的版本
+            if os.path.isfile(self.ICON_FILE):
+                try:
+                    src = Image.open(self.ICON_FILE)
+                    src.size = (256, 256) if (256, 256) in src.info.get("sizes", []) else src.size
+                    src.load()
+                    img = src.convert("RGBA").resize((96, 96), Image.LANCZOS)
+                except Exception:  # noqa: BLE001
+                    pass
+            sp_img = ctk.CTkImage(light_image=img, size=(96, 96))
+            img_label.configure(image=sp_img)
+            img_label._image_ref = sp_img
+        except Exception:  # noqa: BLE001
+            img_label.configure(text="📦", font=ctk.CTkFont(size=56))
+
+        ctk.CTkLabel(
+            sp, text=APP_TITLE,
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color="#0057a5").pack()
+
+        sp_status = ctk.CTkLabel(
+            sp, text="正在启动...", font=ctk.CTkFont(size=12),
+            text_color=COLOR_MUTED)
+        sp_status.pack(pady=(6, 10))
+
+        sp_bar = ctk.CTkProgressBar(sp, width=240, height=8, mode="indeterminate")
+        sp_bar.pack()
+        sp_bar.start()
+
+        version = ctk.CTkLabel(
+            sp, text=VERSION_OF_LAUNCHER, font=ctk.CTkFont(size=10),
+            text_color="#b0b6bd")
+        version.pack(side="bottom", pady=10)
+
+        sp._sp_bar = sp_bar
+        sp._sp_status = sp_status
+        return sp
+
+    def _splash_status(self, text: str) -> None:
+        try:
+            if getattr(self, "_splash", None) and self._splash.winfo_exists():
+                self._splash._sp_status.configure(text=text)
+                self.update_idletasks()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _close_splash(self) -> None:
+        """关闭闪屏并显示主窗口。"""
+        try:
+            if getattr(self, "_splash", None) and self._splash.winfo_exists():
+                self._splash._sp_bar.stop()
+                self._splash.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        self._splash = None
+        try:
+            self.deiconify()               # 显示主窗口
+            self.lift()
+            self.focus_force()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _build_ui_deferred(self) -> None:
+        """分步构建主界面，每步之间让出时间片刷新闪屏。"""
+        steps = [
+            ("加载界面...", self._build_ui),
+            ("读取版本列表...", self._refresh_versions),
+            ("初始化服务器...", self._refresh_servers),
+            ("加载玩家信息...", self._update_player_display),
+            ("准备就绪", self._switch_tab0),
+        ]
+
+        def run_step(i: int = 0) -> None:
+            if i >= len(steps):
+                self._close_splash()
+                # 启动后延迟自动检查更新
+                if self.core.config.get("auto_check_update", True):
+                    self.after(2500, lambda: self._run_bg(self._auto_update_worker))
+                self.protocol("WM_DELETE_WINDOW", self._on_close)
+                return
+            text, fn = steps[i]
+            self._splash_status(text)
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001
+                log.warning("启动步骤失败 %s: %s", text, e)
+            self.after(30, lambda: run_step(i + 1))
+
+        run_step()
+
+    def _switch_tab0(self) -> None:
         self._switch_tab(0)
 
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+    # ---------------- 窗口图标 ----------------
+    ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+
+    # 16x16 像素设计网格：B=亮蓝 D=暗蓝 .=透明
+    _ICON_GRID = (
+        '................',
+        '................',
+        '......BBBBBBBB..',
+        '.....BBBBBBBBBD.',
+        '....BBBBBBBBBDDD',
+        '....BBBBBBBBBDDD',
+        '....BBBB...BDDDD',
+        '....BBB.....DDDD',
+        '....BBB.....DDDD',
+        '....BBB.....DDDD',
+        '....BBB.....DDDD',
+        '....BBB.....DDDD',
+        '....BBBB...BDDDD',
+        '....BBBBBBBBBDDD',
+        '.....BBBBBBBBBD.',
+        '......BBBBBBBB..',
+    )
+
+    def _set_window_icon(self) -> None:
+        """设置窗口/任务栏图标：优先用 ico 文件，缺失时按网格绘制。"""
+        # 1. 优先使用随程序附带的 .ico
+        try:
+            if os.path.isfile(self.ICON_FILE):
+                self.iconbitmap(self.ICON_FILE)
+        except Exception:  # noqa: BLE001
+            pass
+        # 2. 同时用 iconphoto 设置（Tk 9 下对标题栏/任务栏更可靠）
+        try:
+            from PIL import ImageTk
+            img = self._render_icon(64)
+            self._icon_tk_ref = ImageTk.PhotoImage(img)
+            self.iconphoto(True, self._icon_tk_ref)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def _render_icon(cls, size: int):
+        """按网格渲染 3D 蓝色方框图标。"""
+        bright = (2, 156, 255, 255)
+        dark = (0, 98, 177, 255)
+        im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        px = im.load()
+        gw = len(cls._ICON_GRID[0])
+        gh = len(cls._ICON_GRID)
+        for y in range(size):
+            gy = y * gh // size
+            row = cls._ICON_GRID[gy]
+            for x in range(size):
+                gx = x * gw // size
+                ch = row[gx]
+                if ch == "B":
+                    px[x, y] = bright
+                elif ch == "D":
+                    px[x, y] = dark
+        return im
 
     def _init_state(self) -> None:
         self._progress_total = 0
@@ -186,12 +355,10 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
         if not hasattr(self, "_speed_samples"):
             self._speed_samples = []
         
-        # 使用 2 秒滑动窗口计算实时速度
         self._speed_samples.append((now, self._progress_current))
         while len(self._speed_samples) > 2 and now - self._speed_samples[0][0] > 2.0:
             self._speed_samples.pop(0)
 
-        # 限制 UI 刷新频率
         if now - self._last_progress_t < 0.1 and current < total:
             return
         self._last_progress_t = now
@@ -529,13 +696,14 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             box3, "游戏参数", entry=True,
             value=cfg.get("game_args", ""), placeholder="额外传给 Minecraft 的参数")
 
-        box4 = self._settings_card(scroll, "工具")
-        tools = ctk.CTkFrame(box4, fg_color="transparent")
+        box4 = self._build_update_card(scroll)
+
+        box5 = self._settings_card(scroll, "工具")
+        tools = ctk.CTkFrame(box5, fg_color="transparent")
         tools.pack(fill="x", padx=16, pady=(2, 14))
         for text, cmd in (
-            ("安装 Java 21", lambda: self._run_bg(self.core.install_java, "21")),
-            ("检测 Java", lambda: self._run_bg(self.core.list_all_java)),
-            ("检查更新", lambda: self._run_bg(self.core.check_for_updates)),
+            ("安装 Java 21", self._on_install_java),
+            ("检测 Java", self._on_detect_java),
             ("打开游戏目录", lambda: self._open_path(str(MC_DIR))),
             ("打开日志", lambda: self._open_path(str(LOG_FILE))),
         ):
@@ -552,6 +720,226 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
                       command=self._reset_settings).pack(side="right", padx=(0, 10))
 
         return page
+
+    # ---------------- 更新 ----------------
+    def _build_update_card(self, parent) -> ctk.CTkFrame:
+        """设置页的「启动器更新」卡片。"""
+        box = self._settings_card(parent, "启动器更新")
+
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 6))
+
+        self.update_version_label = ctk.CTkLabel(
+            row, text=f"当前版本：{VERSION_OF_LAUNCHER}",
+            text_color=COLOR_TEXT, anchor="w")
+        self.update_version_label.pack(side="left")
+
+        self.update_status_label = ctk.CTkLabel(
+            row, text="", text_color=COLOR_MUTED, anchor="w")
+        self.update_status_label.pack(side="left", padx=(16, 0))
+
+        self.update_btn = ctk.CTkButton(
+            row, text="检查更新", width=110, height=30,
+            command=self._on_check_update)
+        self.update_btn.pack(side="right")
+
+        btn_row = ctk.CTkFrame(box, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 12))
+
+        # 自动检查开关
+        self.auto_update_var = ctk.StringVar(
+            value="开启" if self.core.config.get("auto_check_update", True) else "关闭")
+
+        def on_toggle(choice=None):
+            self.core.config["auto_check_update"] = (self.auto_update_var.get() == "开启")
+            self.core.save_config()
+
+        ctk.CTkLabel(btn_row, text="启动时自动检查：", text_color=COLOR_TEXT).pack(side="left")
+        ctk.CTkSegmentedButton(
+            btn_row, values=["开启", "关闭"], variable=self.auto_update_var,
+            command=on_toggle, width=140).pack(side="left", padx=(0, 16))
+
+        # 下载并安装按钮（默认隐藏，发现更新后出现）
+        self.install_update_btn = ctk.CTkButton(
+            btn_row, text="下载并安装", width=120, height=30,
+            fg_color="#2FA84F", hover_color="#268A40",
+            command=self._on_install_update)
+        self._pending_update_url = None
+
+        return box
+
+    def _auto_update_worker(self) -> None:
+        """启动时的静默检查：有新版本就弹窗提示。"""
+        try:
+            has_new = self.core.check_for_updates(silent=True)
+        except Exception:  # noqa: BLE001
+            return
+        if not has_new or not self.core._latest_release:
+            return
+        tag = self.core._latest_release.get("tag_name", "")
+        self.core.log(f"自动检查：发现新版本 {tag}")
+        self.after(0, lambda: self._prompt_update(tag))
+
+    def _prompt_update(self, tag: str) -> None:
+        import tkinter.messagebox as mb
+        ans = mb.askyesno(
+            "发现新版本",
+            f"检测到新版本 {tag}\n当前版本 {VERSION_OF_LAUNCHER}\n\n是否立即下载并更新？")
+        if not ans:
+            self.core.log("已跳过本次更新，可在「设置 → 启动器更新」中手动检查")
+            return
+        self._switch_tab(NAV_ITEMS.index("设置"))
+        self._on_install_update()
+
+    # ---------------- Java 工具 ----------------
+    def _on_install_java(self) -> None:
+        self._thread_safe_status("正在安装 Java 21...")
+        self._run_bg(self._install_java_worker)
+
+    def _install_java_worker(self) -> None:
+        ok = False
+        try:
+            ok = self.core.install_java("21")
+        except Exception as e:  # noqa: BLE001
+            self.core.java_message = f"安装 Java 失败：{e}"
+        msg = getattr(self.core, "java_message", "") or (
+            "Java 21 安装完成" if ok else "Java 21 安装失败")
+        self.after(0, lambda: self._show_info_dialog(
+            "安装 Java", msg if ok else f"{msg}\n\n请检查网络后重试"))
+
+    def _on_detect_java(self) -> None:
+        self._thread_safe_status("正在检测 Java...")
+        self._run_bg(self._detect_java_worker)
+
+    def _detect_java_worker(self) -> None:
+        found: list[str] = []
+        try:
+            found = self.core.list_all_java() or []
+        except Exception as e:  # noqa: BLE001
+            self.core.java_message = f"检测 Java 失败：{e}"
+
+        if found:
+            lines = "\n".join(f"• {p}" for p in found[:12])
+            msg = f"已检测到 {len(found)} 个 Java：\n\n{lines}"
+        else:
+            msg = ("未检测到任何 Java。\n\n"
+                   "游戏启动需要 Java 17 或更高版本，\n"
+                   "建议点击「安装 Java 21」自动下载。")
+        self.after(0, lambda: self._show_info_dialog("检测 Java", msg))
+
+    def _show_info_dialog(self, title: str, message: str,
+                          ask_update: bool = False) -> None:
+        """统一的提示弹窗（不写入下载日志）。"""
+        import tkinter.messagebox as mb
+
+        # 主窗口可能仍处于隐藏状态（闪屏阶段），先确保可见，
+        # 否则模态弹窗会挂在隐藏窗口上而看不见。
+        try:
+            if not self.winfo_viewable():
+                self.deiconify()
+                self.update_idletasks()
+            parent = self
+        except Exception:  # noqa: BLE001
+            parent = None
+
+        if ask_update:
+            if mb.askyesno(title, f"{message}\n\n是否立即下载并安装？", parent=parent):
+                self._on_install_update()
+            return
+        mb.showinfo(title, message, parent=parent)
+
+    def _on_check_update(self) -> None:
+        self.update_btn.configure(state="disabled", text="检查中...")
+        self.update_status_label.configure(text="正在检查...", text_color=COLOR_MUTED)
+        self.install_update_btn.pack_forget()
+        self._run_bg(self._check_update_worker)
+
+    def _check_update_worker(self) -> None:
+        try:
+            has_new = self.core.check_for_updates(silent=True)
+        except Exception:  # noqa: BLE001
+            has_new = False
+        self.after(0, lambda: self._on_check_update_done(has_new))
+
+    def _on_check_update_done(self, has_new: bool) -> None:
+        msg = getattr(self.core, "update_message", "") or ""
+        has_release = bool(has_new and self.core._latest_release)
+
+        # 更新设置页控件状态（控件可能尚未创建，容错处理）
+        try:
+            if hasattr(self, "update_btn"):
+                self.update_btn.configure(state="normal", text="检查更新")
+            if hasattr(self, "update_status_label"):
+                if has_release:
+                    tag = self.core._latest_release.get("tag_name", "")
+                    self.update_status_label.configure(
+                        text=f"发现新版本 {tag}", text_color="#2FA84F")
+                else:
+                    self.update_status_label.configure(
+                        text="已是最新版本", text_color=COLOR_MUTED)
+            if hasattr(self, "install_update_btn"):
+                if has_release:
+                    self.install_update_btn.pack(side="right", padx=(0, 10))
+                else:
+                    self.install_update_btn.pack_forget()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 独立弹窗提示（不写入下载日志）
+        if has_release:
+            self._show_info_dialog("发现新版本", msg, ask_update=True)
+        else:
+            self._show_info_dialog("检查更新", msg or "当前已是最新版本")
+
+    def _on_install_update(self) -> None:
+        self.install_update_btn.configure(state="disabled", text="下载中...")
+        self.update_status_label.configure(text="正在下载更新...", text_color=COLOR_MUTED)
+        self._switch_tab(NAV_ITEMS.index("下载"))
+        self._run_bg(self._download_update_worker)
+
+    def _download_update_worker(self) -> None:
+        path = None
+        try:
+            path = self.core.download_update()
+        except Exception as e:  # noqa: BLE001
+            self.core.log(f"下载更新异常: {e}")
+        self.after(0, lambda: self._on_download_update_done(path))
+
+    def _on_download_update_done(self, path) -> None:
+        try:
+            self.install_update_btn.configure(state="normal", text="下载并安装")
+        except Exception:  # noqa: BLE001
+            pass
+        if not path:
+            try:
+                self.update_status_label.configure(text="下载失败", text_color="#c94f4f")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        # 直接重启更新，不再需要手动替换
+        import tkinter.messagebox as mb
+        if self.core.apply_update(path):
+            self.core.log("更新已就绪，正在重启...")
+            try:
+                self.update_status_label.configure(text="正在重启...", text_color="#2FA84F")
+            except Exception:  # noqa: BLE001
+                pass
+            # 先正常关闭 UI，再确保进程退出让批处理接管
+            self.after(300, self._quit_for_update)
+        else:
+            mb.showinfo(
+                "更新提示",
+                f"新版本已保存到：\n{self.core.app_dir()}\n\n"
+                "请重新打开程序以使用新版本。")
+
+    def _quit_for_update(self) -> None:
+        """退出进程，交给更新脚本替换并重启。"""
+        try:
+            self.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        os._exit(0)
 
     def _settings_card(self, parent, title: str) -> ctk.CTkFrame:
         box = ctk.CTkFrame(parent, fg_color=COLOR_WHITE, corner_radius=8)
@@ -896,8 +1284,10 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
     def _render_version_error(self, msg: str) -> None:
         for w in self.game_list_scroll.winfo_children():
             w.destroy()
-        ctk.CTkLabel(self.game_list_scroll, text=f"获取版本失败: {msg}",
-                     text_color="#c94f4f").pack(pady=20)
+        ctk.CTkLabel(self.game_list_scroll, text=f"获取版本失败，请检查网络连接\n{msg}",
+                     text_color="#c94f4f", justify="center").pack(pady=20)
+        ctk.CTkButton(self.game_list_scroll, text="重试", 
+                      command=lambda: self._run_bg(self._load_versions_job)).pack(pady=10)
 
     PAGE_SIZE = 60
 
@@ -1100,8 +1490,10 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             return
         for w in scroll.winfo_children():
             w.destroy()
-        ctk.CTkLabel(scroll, text=f"获取{category}失败: {msg}",
-                     text_color="#c94f4f").pack(pady=20)
+        ctk.CTkLabel(scroll, text=f"获取{category}失败，请检查网络\n{msg}",
+                     text_color="#c94f4f", justify="center").pack(pady=20)
+        ctk.CTkButton(scroll, text="重试", 
+                      command=lambda: self._refresh_modrinth(category, "")).pack(pady=10)
 
     def _render_modrinth(self, category: str, hits) -> None:
         scroll = getattr(self, f"_scroll_{category}", None)
@@ -1148,26 +1540,27 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
     def _load_modrinth_icon(self, url: str, label: ctk.CTkLabel) -> None:
         def job():
             if url in _ICON_CACHE:
-                self.after(0, lambda: self._apply_icon_to_label(label, _ICON_CACHE[url]))
+                self.after(0, lambda: self._apply_icon_to_label(label, _ICON_CACHE[url], url))
                 return
                 
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": f"SimpleMCLauncher/{VERSION_OF_LAUNCHER}"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     data = resp.read()
                 img = Image.open(io.BytesIO(data)).convert("RGBA").resize((48, 48), Image.Resampling.LANCZOS)
                 _ICON_CACHE[url] = img
                 
-                self.after(0, lambda: self._apply_icon_to_label(label, img))
-            except Exception:
-                self.after(0, lambda: label.configure(text="📦"))
+                self.after(0, lambda: self._apply_icon_to_label(label, img, url))
+            except Exception as e:
+                self._thread_safe_log(f"图标加载失败: {e}")
+                self.after(0, lambda: label.configure(text="🖼️"))
 
         self._run_bg(job)
 
-    def _apply_icon_to_label(self, label, pil_img):
+    def _apply_icon_to_label(self, label, pil_img, url):
         try:
             ctk_img = ctk.CTkImage(light_image=pil_img, size=(48, 48))
-            label._image_ref = ctk_img
+            _CTK_IMAGES[url] = ctk_img  # 存入全局字典，防止被回收
             label.configure(image=ctk_img, text="")
         except Exception:
             pass
@@ -1364,6 +1757,7 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
 
     AVATAR_SOURCES = (
         "https://api.mcheads.org/head/{name}/256",
+        "https://mc-heads.net/avatar/{name}/80"
     )
     _AVATAR_UA = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1391,6 +1785,8 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
                     continue
             if data:
                 self.after(0, lambda: self._apply_avatar(data))
+            else:
+                self._thread_safe_log("无法获取玩家头像，请检查网络")
 
         self._run_bg(job)
 
@@ -1409,7 +1805,8 @@ class SimpleMCLauncherGUI(ctk.CTk, TkinterDnD.DnDWrapper if _DND_AVAILABLE else 
             ctk_img = ctk.CTkImage(light_image=img, size=(80, 80))
             self._avatar_ref = ctk_img
             self.avatar_label.configure(image=ctk_img, text="")
-        except Exception:
+        except Exception as e:
+            self._thread_safe_log(f"头像解析失败: {e}")
             self._show_avatar_placeholder()
 
     def _show_login_dialog(self) -> None:

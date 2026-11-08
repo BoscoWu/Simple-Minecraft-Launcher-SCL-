@@ -32,6 +32,7 @@ from utils import (
     PYLAUNCHER_DIR, MC_DIR, SERVER_DIR, JAVA_DIR, CONFIG_FILE,
     CLIENT_ID, REDIRECT_URL, USER_AGENT, VERSION_OF_LAUNCHER,
     REPO_OWNER, REPO_NAME, FRP_DIR, FRPC_CONFIG, FRPC_LOG, FRP_DOWNLOAD_URL,
+    SITE_URL, UPDATE_API_URLS, UPDATE_DL_PREFIXES, UPDATE_ASSET_NAME,
     load_config, save_config, check_java, find_java_executable,
     download_file, fetch_json, get_session, file_sha1, human_size,
     setup_logging, get_logger, compare_versions,
@@ -218,6 +219,13 @@ class LauncherCore:
         self._task_total_steps = 0
         self._task_step_index = 0
         self._task_step_max_hint = 0
+
+        # 最近一次检查到的可用更新（Release JSON）
+        self._latest_release: Optional[Dict[str, Any]] = None
+        # 最近一次检查更新的提示文案（供界面弹窗使用）
+        self.update_message: str = ""
+        # 最近一次 Java 安装/检测的提示文案
+        self.java_message: str = ""
 
         self._ensure_directories()
         self._load_deepseek_config()
@@ -2099,10 +2107,14 @@ class LauncherCore:
     # Java
     # ------------------------------------------------------------------
     def install_java(self, version: str) -> bool:
-        """通过 Adoptium API 下载指定大版本的 JRE。"""
+        """通过 Adoptium API 下载指定大版本的 JRE。
+
+        设置 ``self.java_message`` 供界面弹窗展示。
+        """
         version = (version or "").strip()
+        self.java_message = ""
         if not version:
-            self.log("错误: 未指定 Java 版本")
+            self.java_message = "未指定 Java 版本"
             return False
         try:
             os_name = "windows" if platform.system() == "Windows" else "linux"
@@ -2113,7 +2125,7 @@ class LauncherCore:
                    f"?architecture={arch}&image_type=jre&os={os_name}&vendor=eclipse")
             data = fetch_json(url)
             if not data:
-                self.log(f"未找到 Java {version} 的可用下载")
+                self.java_message = f"未找到 Java {version} 的可用下载"
                 return False
             binary = data[0]["binary"]
             package = binary["package"]
@@ -2123,7 +2135,7 @@ class LauncherCore:
             target_dir = os.path.join(JAVA_DIR, name)
             if os.path.isdir(target_dir) and os.path.isfile(
                     os.path.join(target_dir, "bin", "java.exe" if os.name == "nt" else "java")):
-                self.log(f"Java {version} 已安装: {target_dir}")
+                self.java_message = f"Java {version} 已安装，无需重复安装\n{target_dir}"
                 return True
 
             self.status(f"正在下载 Java {version}...")
@@ -2146,11 +2158,11 @@ class LauncherCore:
             except Exception:  # noqa: BLE001
                 pass
 
-            self.log(f"Java {version} 安装完成: {target_dir}")
+            self.java_message = f"Java {version} 安装完成\n{target_dir}"
             self.status("Java 安装完成")
             return True
         except Exception as e:  # noqa: BLE001
-            self.log(f"安装 Java 失败: {e}")
+            self.java_message = f"安装 Java {version} 失败：{e}"
             self.status("Java 安装失败")
             log.exception("安装 Java 失败")
             return False
@@ -2268,21 +2280,215 @@ class LauncherCore:
     # 更新检查
     # ------------------------------------------------------------------
     def check_for_updates(self, silent: bool = False) -> bool:
-        try:
-            api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-            resp = get_session().get(api_url, timeout=15)
-            resp.raise_for_status()
-            latest = resp.json()
-            latest_tag = latest.get("tag_name", "")
-            if not latest_tag:
-                return False
-            if compare_versions(latest_tag.lstrip("v"), VERSION_OF_LAUNCHER.lstrip("v")) > 0:
+        """检查是否有新版本。找到时缓存最新版本信息，返回 True。
+
+        设置 ``self.update_message`` 供界面直接展示提示文案。
+        """
+        self._latest_release = None
+        self.update_message = ""
+        for url in UPDATE_API_URLS:
+            try:
+                resp = get_session().get(url, timeout=20,
+                                         headers={"User-Agent": USER_AGENT})
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                tag = (data or {}).get("tag_name", "")
+                if not tag:
+                    continue
+                if compare_versions(tag.lstrip("v"), VERSION_OF_LAUNCHER.lstrip("v")) > 0:
+                    self._latest_release = data
+                    self.update_message = (
+                        f"发现新版本 {tag}\n"
+                        f"当前版本：{VERSION_OF_LAUNCHER}")
+                    if not silent:
+                        self.log(f"发现新版本: {tag}（当前 {VERSION_OF_LAUNCHER}）")
+                    return True
+                self.update_message = f"当前已是最新版本 {VERSION_OF_LAUNCHER}"
                 if not silent:
-                    self.log(f"发现新版本: {latest_tag}")
-                return True
+                    self.log(self.update_message)
+                return False
+            except Exception as e:  # noqa: BLE001
+                log.warning("更新源失败 %s: %s", url, e)
+                continue
+        self.update_message = "检查更新失败：网络不可用或所有更新源均无法访问"
+        if not silent:
+            self.log(self.update_message)
+        return False
+
+    def _find_asset(self, release) -> Optional[Dict[str, Any]]:
+        """从 Release 中找到当前平台的安装包。"""
+        assets = (release or {}).get("assets") or []
+        if not assets:
+            return None
+        if os.name == "nt":
+            prefer = (UPDATE_ASSET_NAME, ".exe")
+        elif sys.platform == "darwin":
+            prefer = ("SimpleMCLauncher.dmg", ".dmg")
+        else:
+            prefer = (".deb", ".AppImage")
+        for want in prefer:
+            for a in assets:
+                if str(a.get("name", "")).lower().endswith(want.lower()) or a.get("name") == want:
+                    return a
+        return assets[0]
+
+    def download_update(self, release: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """下载最新版本到更新目录，返回本地文件路径。"""
+        release = release or self._latest_release
+        if not release:
+            self.log("没有可用的更新信息，请先检查更新")
+            return None
+
+        asset = self._find_asset(release)
+        if not asset:
+            self.log("该版本没有适合当前系统的安装包")
+            return None
+
+        url = asset.get("browser_download_url") or ""
+        name = asset.get("name") or UPDATE_ASSET_NAME
+        size = int(asset.get("size", 0) or 0)
+        if not url:
+            self.log("安装包下载地址为空")
+            return None
+
+        # 直接下载到程序同目录，避免二次搬运
+        dest = os.path.join(self.app_dir(), name)
+
+        tag = release.get("tag_name", "latest")
+        self.log(f"开始下载 {name}（{human_size(size)}）...")
+        self.status("正在下载更新...")
+        self.begin_task(1, f"下载更新 {tag}")
+
+        last_err = None
+        for prefix in UPDATE_DL_PREFIXES:
+            full = prefix + url if prefix else url
+            try:
+                download_file(full, dest, callback=self.progress,
+                              headers={"User-Agent": USER_AGENT},
+                              timeout=(20, 180), max_retries=2)
+                self.end_task()
+                self.log(f"更新包已下载: {dest}")
+                self.status("更新下载完成")
+                return dest
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                log.warning("下载源失败 %s: %s", full, e)
+                continue
+
+        self.end_task()
+        self.log(f"更新下载失败: {last_err}")
+        self.status("更新下载失败")
+        return None
+
+    def apply_update(self, new_file: str) -> bool:
+        """用下载好的新版本替换旧版本，并重启程序。"""
+        new_file = (new_file or "").strip()
+        if not new_file or not os.path.isfile(new_file):
+            self.log("更新包不存在")
+            return False
+
+        if os.name == "nt":
+            return self._apply_update_windows(new_file)
+        return self._apply_update_posix(new_file)
+
+    def app_dir(self) -> str:
+        """启动器所在目录（exe 模式为 exe 目录，源码模式为脚本目录）。"""
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
+        main_mod = sys.modules.get("__main__")
+        main_file = getattr(main_mod, "__file__", "") or ""
+        if main_file and os.path.isfile(main_file):
+            return os.path.dirname(os.path.abspath(main_file))
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+    def _apply_update_windows(self, new_file: str) -> bool:
+        """Windows：把新版本放到程序目录，结束旧进程后启动新版本。"""
+        target = os.path.join(self.app_dir(), UPDATE_ASSET_NAME)
+
+        # 若下载文件已在目标位置，检查名字是否一致
+        same = os.path.abspath(new_file) == os.path.abspath(target)
+
+        # 1. 先把新 exe 落地到程序目录（用临时名避免覆盖正在运行的自身）
+        staged = os.path.join(self.app_dir(), "_update_new.exe")
+        try:
+            if not same:
+                shutil.copy2(new_file, staged)
         except Exception as e:  # noqa: BLE001
-            if not silent:
-                self.log(f"检查更新失败: {e}")
+            self.log(f"复制更新包失败: {e}")
+            self.status("更新失败")
+            return False
+
+        script = os.path.join(tempfile.gettempdir(), "_smcl_update.bat")
+        pid = os.getpid()
+
+        # 批处理：等旧进程退出 -> 用新 exe 替换 -> 启动 -> 自删
+        if getattr(sys, "frozen", False):
+            # 打包模式：当前 exe 就是程序本体，需要替换后重启
+            launch = target
+            bat = f"""@echo off
+chcp 65001 >nul
+set RETRY=0
+echo 正在更新 SimpleMCLauncher...
+:wait
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if not errorlevel 1 (
+    set /a RETRY+=1
+    if %RETRY% GEQ 40 goto force
+    ping 127.0.0.1 -n 1 >nul
+    goto wait
+)
+:force
+move /y "{staged}" "{target}" >nul 2>&1
+if errorlevel 1 (
+    ping 127.0.0.1 -n 2 >nul
+    move /y "{staged}" "{target}" >nul 2>&1
+)
+start "" "{launch}"
+del "%~f0" >nul 2>&1
+"""
+        else:
+            # 源码模式：直接启动下载好的 exe，让用户用它
+            bat = f"""@echo off
+chcp 65001 >nul
+set RETRY=0
+echo 正在更新 SimpleMCLauncher...
+:wait
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if not errorlevel 1 (
+    set /a RETRY+=1
+    if %RETRY% GEQ 40 goto force
+    ping 127.0.0.1 -n 1 >nul
+    goto wait
+)
+:force
+if exist "{staged}" move /y "{staged}" "{target}" >nul 2>&1
+start "" "{target}"
+del "%~f0" >nul 2>&1
+"""
+
+        try:
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(bat)
+            self.log(f"新版本将保存到: {target}")
+            self.log("即将关闭当前程序并启动新版本...")
+            self.status("正在重启...")
+            subprocess.Popen(
+                ["cmd", "/c", script],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+                close_fds=True,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.log(f"启动更新脚本失败: {e}")
+            self.status("更新失败")
+            return False
+
+    def _apply_update_posix(self, new_file: str) -> bool:
+        """Linux/macOS：用 shell 脚本替换。"""
+        self.log(f"已下载新版本到: {new_file}")
+        self.log("请手动替换旧版本文件。")
+        self.status("请手动完成替换")
         return False
 
     # ------------------------------------------------------------------

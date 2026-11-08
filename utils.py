@@ -41,6 +41,21 @@ VERSION_OF_LAUNCHER = "v3.1.0"
 REPO_OWNER = "BoscoWu"
 REPO_NAME = "Simple-Minecraft-Launcher-SCL-"
 
+# 更新检查：官网与 GitHub 双源（国内直连 GitHub API 常被阻断，走镜像）
+SITE_URL = "https://simplemclauncher.xin"
+UPDATE_API_URLS = (
+    f"https://gh-proxy.com/https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
+    f"https://ghproxy.net/https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
+    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
+)
+# 下载加速前缀（按序尝试）
+UPDATE_DL_PREFIXES = (
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "",
+)
+UPDATE_ASSET_NAME = "SimpleMCLauncher.exe"
+
 USER_AGENT = f"SimpleMCLauncher/{VERSION_OF_LAUNCHER}"
 
 CLIENT_ID = "8d7c60d0-fddf-464c-a9f4-d190f1daa576"
