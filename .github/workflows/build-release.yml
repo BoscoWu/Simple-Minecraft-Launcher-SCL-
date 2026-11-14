@@ -1,0 +1,117 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+          - os: ubuntu-latest
+            artifact: linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Install WiX (Windows, for .exe installer)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install wixtoolset --no-progress -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" >> $env:GITHUB_PATH
+
+      - name: Install fakeroot (Linux, for .deb)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot
+
+      - name: Build package
+        shell: bash
+        run: |
+          chmod +x mvnw build.sh
+          ./build.sh
+
+      - name: List output
+        shell: bash
+        run: ls -laR target/dist || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.artifact }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show files
+        run: ls -laR dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Simple MC Launcher ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Simple MC Launcher ${{ github.ref_name }}
+
+            极简 MC 启动器 · JavaFX 版
+
+            ### 下载
+
+            | 平台 | 文件 |
+            |------|------|
+            | Windows | `SimpleMCLauncher-*-windows.zip` 或 `.exe` 安装包 |
+            | macOS | `SimpleMCLauncher-*.dmg` |
+            | Linux | `simplemc-launcher_*_amd64.deb` |
+
+            ### 安装说明
+
+            - **Windows**：解压 zip 后运行 `SimpleMCLauncher.exe`；或直接运行 `.exe` 安装包
+            - **macOS**：打开 `.dmg`，把启动器拖进 Applications
+              - 首次打开若提示「无法验证开发者」，右键点击 → 打开
+            - **Linux**：`sudo dpkg -i simplemc-launcher_*_amd64.deb`
+
+            ### 系统要求
+
+            - Windows 10 / 11
+            - macOS 11+
+            - Linux x86_64（需要 GTK3）
+            - 已内置 Java 21 运行时，无需自行安装 Java
+          files: dist/**
+          fail_on_unmatched_files: false

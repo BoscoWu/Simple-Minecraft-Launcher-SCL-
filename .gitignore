@@ -1,0 +1,32 @@
+# ---- Java / Maven ----
+target/
+*.class
+*.jar
+!mvnw
+!mvnw.cmd
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- 运行数据（不提交）----
+pyLauncher/
+*.log
+cache/
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 构建产物 ----
+dist/
+*.exe
+*.dmg
+*.deb
+*.AppImage
