@@ -151,15 +151,26 @@ case "$OS" in
             "Compress-Archive -Path '$APP_NAME' -DestinationPath '$APP_NAME-$APP_VERSION-windows.zip' -Force" )
         ;;
     Darwin)
+        # macOS 的 app-image 直接产出 <dest>/SimpleMCLauncher.app，
+        # 不会建 SimpleMCLauncher/ 这一层目录。
         build_app_image src/main/resources/icon.icns
 
+        APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+        if [ ! -d "$APP_BUNDLE" ]; then
+            echo "ERROR: 未找到 $APP_BUNDLE"
+            ls -la "$DIST_DIR"
+            exit 1
+        fi
+
+        # 把 .app 和 pyLauncher 放进同一个外层文件夹，
+        # 保证「解压后是一个文件夹，里面 app 和 runtime 都在」
         PKG="$DIST_DIR/$APP_NAME"
-        echo "==> macOS 产物实际内容："
-        ls -la "$PKG" || true
+        mkdir -p "$PKG"
+        mv "$APP_BUNDLE" "$PKG/"
         prepare_data_dir "$PKG"
 
         echo "==> 压缩为 zip"
-        ( cd "$DIST_DIR" && zip -qr "$APP_NAME-$APP_VERSION-macos.zip" "$APP_NAME" )
+        ( cd "$DIST_DIR" && zip -qry "$APP_NAME-$APP_VERSION-macos.zip" "$APP_NAME" )
         ;;
     Linux)
         build_app_image src/main/resources/icon.png
@@ -215,26 +226,19 @@ case "$OS" in
     Darwin)
         check_dir "$PKG"
         check_dir "$PKG/pyLauncher"
-
-        # macOS 的 jpackage app-image 可能有两种布局：
-        #  1) <pkg>/SimpleMCLauncher.app（标准 .app 包）
-        #  2) <pkg>/bin/ + <pkg>/lib/app/ + <pkg>/lib/runtime/（无签名时）
         APP_BUNDLE="$(find "$PKG" -maxdepth 1 -name "*.app" 2>/dev/null | head -1)"
         if [ -n "$APP_BUNDLE" ]; then
             echo "  OK   ${APP_BUNDLE#$DIST_DIR/}"
             check_dir "$APP_BUNDLE/Contents/app"
             check_dir "$APP_BUNDLE/Contents/runtime"
-            MAC_EXE="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+            if [ -f "$APP_BUNDLE/Contents/MacOS/$APP_NAME" ]; then
+                echo "  OK   ${APP_BUNDLE#$DIST_DIR/}/Contents/MacOS/$APP_NAME"
+            else
+                echo "  MISS Contents/MacOS/$APP_NAME"
+                STRUCT_OK=0
+            fi
         else
-            echo "  INFO 没有 .app 包，检查 bin/lib 布局"
-            check_dir "$PKG/lib/app"
-            check_dir "$PKG/lib/runtime"
-            MAC_EXE="$PKG/bin/$APP_NAME"
-        fi
-        if [ -f "$MAC_EXE" ]; then
-            echo "  OK   ${MAC_EXE#$DIST_DIR/}"
-        else
-            echo "  MISS 可执行文件"
+            echo "  MISS *.app"
             STRUCT_OK=0
         fi
         ;;
