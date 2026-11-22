@@ -58,6 +58,15 @@ public final class MainWindow {
         scene.getStylesheets().add("data:text/css;base64," + java.util.Base64.getEncoder()
                 .encodeToString(Theme.CSS.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
 
+        // 圆角平台（Win11）：场景填透明色，让 DWM 的圆角能透出来。
+        // 否则 JavaFX 的纯色背景会画满整个窗口矩形，把系统圆角盖住。
+        if (Theme.ROUNDED && com.simplemc.launcher.util.Constants.isWindows()) {
+            scene.setFill(javafx.scene.paint.Color.TRANSPARENT);
+            root.setStyle("-fx-background-color: transparent;");
+            shell.setStyle("-fx-background-color: " + Theme.BG + ";"
+                    + "-fx-background-radius: " + (int) Theme.RADIUS + ";");
+        }
+
         // 全窗口拖拽导入整合包
         setupGlobalDragDrop(scene);
 
@@ -75,7 +84,29 @@ public final class MainWindow {
         } catch (Exception ignored) {}
 
         stage.show();
+
+        // 窗口显示后再设圆角：Windows 11 用 DWM 原生圆角，
+        // Windows 10 及非 Windows 保持直角。
+        applyWindowCorners();
+
         Log.info("主窗口已显示");
+    }
+
+    /**
+     * 按平台应用窗口圆角。
+     *
+     * <p>JavaFX 的无边框窗口不会自动获得系统圆角，需要调 DWM。
+     * 窗口刚 show 时句柄可能还没就绪，所以延迟一帧再试。</p>
+     */
+    private void applyWindowCorners() {
+        Runnable task = () -> {
+            if (!com.simplemc.launcher.util.Constants.isWindows()) return;
+            com.simplemc.launcher.util.Win11Corners.applyByPlatform();
+        };
+        // 窗口刚显示时可能还没完全就绪，延迟再补一次
+        javafx.application.Platform.runLater(task);
+        javafx.application.Platform.runLater(() ->
+                javafx.application.Platform.runLater(task));
     }
 
     // ---------------- 全局拖拽导入整合包 ----------------

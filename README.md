@@ -5,8 +5,6 @@
 一键安装原版与 Fabric / Forge / Quilt / NeoForge，从 Modrinth 查找模组与整合包，
 拖拽即可导入，内置服务器面板，在一个地方完成下载、更新与备份。
 
-![启动页](shots/shot-home.png)
-
 ## 下载
 
 | 平台 | 文件 |
@@ -34,14 +32,28 @@
 
 ### 内容管理
 - Modrinth 集成：模组、整合包、数据包、资源包、光影、世界、收藏夹
+- **版本选择页**：点下载后先选目标版本，当前适配的版本排最前并标「推荐」（原版优先）
+- **按类型装到对应目录**（版本隔离）：
+  - 模组 → `versions/<版本>/mods/`
+  - 资源包 → `versions/<版本>/resourcepacks/`
+  - 光影包 → `versions/<版本>/shaderpacks/`
+  - 数据包 → 弹窗选世界 → `versions/<版本>/saves/<世界>/datapacks/`
+  - 整合包 → 安装为独立实例
 - 整合包导入：支持 `.mrpack` 与 `.zip`，**拖到窗口任意位置**即可导入
-- 每个整合包/加载器实例独立目录，互不干扰
+- 压缩包内自带 Forge/NeoForge 安装器时会自动识别并执行
+
+### 目录自检
+- 启动时检查 `versions` / `libraries` / `assets` / `mods` / `resourcepacks` /
+  `shaderpacks` / `saves` / `screenshots` / `config` / `logs`
+- 缺失的目录自动补建（只建空目录，不动已有内容）
+- 关键目录缺失时提示可到回收站还原
 
 ### 下载
 - 多线程分片下载，并发数可在设置里调整（1-32）
 - 官方 CDN 优先，BMCLAPI 镜像自动回退
 - HTML 响应识别与拒绝、SHA1 校验、断点续传
 - 失败自动重试（TLS 握手失败 / 超时 / 429 限流）
+- 支持 HTTP / SOCKS5 代理，会一并传给外部安装器
 
 ### 实例管理
 - 左侧文件夹列表 + 右侧可搜索列表
@@ -59,6 +71,11 @@
 - 游戏语言自动设为简体中文
 - Windows 10 直角界面 / Windows 11、macOS、Linux 圆角界面
 - 全文中文界面
+
+### 多语言混编
+- Java 负责界面与下载流程
+- Python 负责版本分类（愚人节判定）与 WebP 图标解码
+- 未安装 Python 时自动降级到纯 Java 实现，功能不受影响
 
 ## 从源码运行
 
@@ -101,6 +118,8 @@ src/main/java/com/simplemc/launcher/
 │   ├── LoaderInstaller.java  Fabric/Forge/NeoForge/Quilt
 │   ├── GameLauncher.java     启动游戏（合并 inheritsFrom）
 │   ├── InstanceManager.java  实例与整合包导入
+│   ├── InstancePaths.java    实例内容目录（版本隔离）
+│   ├── DirRepair.java        目录完整性自检
 │   ├── JavaManager.java      Java 检测与安装
 │   ├── AccountManager.java   正版/离线账户
 │   ├── Modrinth.java         Modrinth API
@@ -110,13 +129,27 @@ src/main/java/com/simplemc/launcher/
 │   ├── MainWindow.java       主窗口与全局拖拽
 │   ├── Theme.java            主题与样式
 │   ├── SplashScreen.java     启动闪屏
-│   └── page/                 各页面
+│   └── page/
+│       ├── HomePage.java     启动页
+│       ├── DownloadPage.java 下载页
+│       ├── VersionPicker.java 版本选择页
+│       ├── ServerPage.java   服务器页
+│       └── SettingsPage.java 设置页
 └── util/
     ├── Config.java           配置（损坏自动修复）
     ├── Downloader.java       多线程下载
     ├── Http.java             HTTP 与镜像
+    ├── ProxyUtil.java        代理设置
+    ├── PyBridge.java         Python 桥（混编）
+    ├── Win11Corners.java     Windows 窗口圆角
     ├── Log.java              日志
     └── Constants.java        常量与平台检测
+
+src_lib/com/fasterxml/jackson/databind/
+                              轻量 JSON 实现（替代 Jackson，省约 1.9MB）
+
+src/main/resources/py/
+    scl_helper.py             Python 侧：版本分类 + WebP 解码
 ```
 
 数据目录为程序同级的 `pyLauncher/`，游戏目录为 `pyLauncher/.minecraft`。

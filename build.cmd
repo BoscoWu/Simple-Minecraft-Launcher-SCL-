@@ -36,7 +36,7 @@ if "%TARGET%"=="app-image" (
     jpackage ^
       --type app-image ^
       --name SimpleMCLauncher ^
-      --app-version 5.1.0 ^
+      --app-version 5.2.0 ^
       --vendor "BoscoWu" ^
       --description "极简 MC 启动器" ^
       --input target\libs ^
@@ -52,7 +52,7 @@ if "%TARGET%"=="app-image" (
     jpackage ^
       --type exe ^
       --name SimpleMCLauncher ^
-      --app-version 5.1.0 ^
+      --app-version 5.2.0 ^
       --vendor "BoscoWu" ^
       --description "极简 MC 启动器" ^
       --input target\libs ^

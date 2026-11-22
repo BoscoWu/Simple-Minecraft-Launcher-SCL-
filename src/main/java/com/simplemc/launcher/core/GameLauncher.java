@@ -339,21 +339,46 @@ public final class GameLauncher {
                 }
             }
         }
-        // client jar：优先用版本自己的，没有就找父版本
-        Path clientJar = mcDir.resolve("versions").resolve(versionId).resolve(versionId + ".jar");
-        if (!Files.isRegularFile(clientJar)) {
-            String parent = vjson.path("inheritsFrom").asText("");
-            if (!parent.isBlank()) {
-                Path pj = mcDir.resolve("versions").resolve(parent).resolve(parent + ".jar");
-                if (Files.isRegularFile(pj)) clientJar = pj;
-            }
-        }
-        if (Files.isRegularFile(clientJar)) {
+        // client jar：优先用版本自己的，没有就沿 inheritsFrom 链向上找父版本的 jar。
+        // 注意：vjson 是合并后的结果，里面的 inheritsFrom 已被清掉，
+        // 所以父链要从磁盘上的原始 JSON 重新读。
+        Path clientJar = findClientJar(versionId);
+        if (clientJar != null) {
             entries.add(clientJar.toAbsolutePath().toString());
         } else {
-            Log.warn("找不到客户端 jar: " + clientJar);
+            // Forge / NeoForge 用自己的 BootstrapLauncher，不需要原版 jar，
+            // 这种情况不算错误，只在完全找不到任何 jar 时提示。
+            Log.info("该版本没有独立的客户端 jar（加载器版本通常不需要）");
         }
         return String.join(File.pathSeparator, entries);
+    }
+
+    /**
+     * 沿 inheritsFrom 链找客户端 jar。
+     *
+     * @return 找到的 jar 路径；整条链都没有返回 null
+     */
+    private Path findClientJar(String versionId) {
+        String current = versionId;
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        while (current != null && !current.isBlank() && seen.add(current)) {
+            Path jar = mcDir.resolve("versions").resolve(current)
+                    .resolve(current + ".jar");
+            if (Files.isRegularFile(jar)) return jar;
+
+            // 读原始 JSON 拿下一级父版本
+            Path json = mcDir.resolve("versions").resolve(current)
+                    .resolve(current + ".json");
+            if (!Files.isRegularFile(json)) return null;
+            try {
+                JsonNode node = com.simplemc.launcher.util.Http.MAPPER.readTree(
+                        Files.readAllBytes(json));
+                current = node.path("inheritsFrom").asText("");
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /** 把 maven 坐标 group:artifact:version[:classifier] 转成 libraries 下的路径 */

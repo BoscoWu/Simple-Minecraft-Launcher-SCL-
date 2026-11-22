@@ -304,12 +304,23 @@ public final class LoaderInstaller {
         installerUrls.add(installerUrl);
         Downloader.download(installerUrls, installer, null, null);
 
+        // 关键：Forge / NeoForge 的安装器会检查 launcher_profiles.json，
+        // 没有就直接报 "There is no minecraft launcher profile ... you need
+        // to run the launcher first!" 然后退出。启动器从不跑官方启动器，
+        // 所以必须自己补上这个文件。
+        ensureLauncherProfiles();
+
         // 运行安装器
         stage.accept("运行 " + loader.display + " 安装器（可能需要几分钟）...");
-        ProcessBuilder pb = new ProcessBuilder(
-                javaBin, "-jar", installer.toAbsolutePath().toString(),
-                "--installClient",
-                mcDir.toAbsolutePath().toString());
+        // 安装器是独立 JVM，需要显式把代理参数传进去
+        List<String> cmdList = new ArrayList<>();
+        cmdList.add(javaBin);
+        cmdList.addAll(com.simplemc.launcher.util.ProxyUtil.jvmArgs());
+        cmdList.add("-jar");
+        cmdList.add(installer.toAbsolutePath().toString());
+        cmdList.add("--installClient");
+        cmdList.add(mcDir.toAbsolutePath().toString());
+        ProcessBuilder pb = new ProcessBuilder(cmdList);
         pb.directory(mcDir.toFile());
         pb.redirectErrorStream(true);
         Path installLog = cache.resolve(loader.name().toLowerCase() + "-install.log");
@@ -324,7 +335,7 @@ public final class LoaderInstaller {
         if (p.exitValue() != 0) {
             String tail = tailOf(installLog, 30);
             throw new IllegalStateException(loader.display + " 安装失败 (exit "
-                    + p.exitValue() + ")\n" + tail);
+                    + p.exitValue() + ")\n" + diagnose(installLog, loader) + tail);
         }
 
         // 找出实际生成的版本目录
@@ -338,6 +349,89 @@ public final class LoaderInstaller {
         writeDisplayName(actualId, displayName, loader, lv, mcVersion);
         stage.accept(loader.display + " 安装完成: " + displayName);
         return actualId;
+    }
+
+    /**
+     * 确保 {@code launcher_profiles.json} 存在。
+     *
+     * <p>Forge / NeoForge 的官方安装器启动时会读这个文件，
+     * 缺失就拒绝安装。这里写一个最小合法结构即可，
+     * 已存在时不覆盖（保留用户原有 profile）。</p>
+     */
+    private void ensureLauncherProfiles() {
+        try {
+            Files.createDirectories(mcDir);
+            Path file = mcDir.resolve("launcher_profiles.json");
+            if (Files.isRegularFile(file) && Files.size(file) > 10) {
+                // 已存在，但要确认是合法 JSON（损坏过就重建）
+                try {
+                    Http.MAPPER.readTree(Files.readAllBytes(file));
+                    return;
+                } catch (Exception ignored) {
+                    Log.warn("launcher_profiles.json 已损坏，重新生成");
+                }
+            }
+            String content = "{\n"
+                    + "  \"profiles\": {},\n"
+                    + "  \"settings\": {\n"
+                    + "    \"enableSnapshots\": false,\n"
+                    + "    \"enableAdvanced\": true,\n"
+                    + "    \"keepLauncherOpen\": false,\n"
+                    + "    \"showGameLog\": false,\n"
+                    + "    \"showMenu\": false,\n"
+                    + "    \"soundOn\": false\n"
+                    + "  },\n"
+                    + "  \"version\": 3\n"
+                    + "}\n";
+            Files.writeString(file, content, StandardCharsets.UTF_8);
+            Log.info("已创建 launcher_profiles.json（供 Forge/NeoForge 安装器使用）");
+        } catch (Exception e) {
+            Log.warn("创建 launcher_profiles.json 失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 根据安装日志给出人话版失败原因。
+     *
+     * <p>NeoForge / Forge 安装器要连 maven.neoforged.net 与
+     * libraries.minecraft.net，国内网络经常连不上，
+     * 日志里只有一句 "There was an error during installation"，
+     * 对用户没有参考价值。这里识别几类典型错误并给出建议。</p>
+     */
+    private String diagnose(Path installLog, Loader loader) {
+        String text;
+        try {
+            text = Files.readString(installLog, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
+
+        StringBuilder hint = new StringBuilder();
+        hint.append("\n【失败原因】\n");
+
+        if (text.contains("Connect timed out") || text.contains("SocketTimeoutException")) {
+            hint.append("连接下载服务器超时。")
+                .append(loader.display)
+                .append(" 安装器需要访问 maven.neoforged.net，")
+                .append("这个域名在部分网络环境下无法连接。\n")
+                .append("\n【解决办法】（任选其一）\n")
+                .append("1. 开代理后重试：「设置 → 代理设置」填 http://127.0.0.1:端口\n")
+                .append("2. 手动安装：从 https://neoforged.net 下载安装器，")
+                .append("双击运行并选择目录\n")
+                .append("   ").append(mcDir.toAbsolutePath()).append("\n")
+                .append("3. 改用 Fabric / Quilt（它们用 meta.fabricmc.net，国内可直连）\n");
+        } else if (text.contains("launcher profile")) {
+            hint.append("缺少 launcher_profiles.json（本启动器应已自动创建）。\n")
+                .append("请把该文件放到：").append(mcDir.toAbsolutePath()).append("\n");
+        } else if (text.contains("UnknownHostException")) {
+            hint.append("DNS 解析失败，请检查网络或 DNS 设置。\n");
+        } else if (text.contains("403") || text.contains("401")) {
+            hint.append("服务器拒绝访问（可能需要代理或镜像失效）。\n");
+        } else {
+            hint.append("安装器内部错误，详情见日志：\n")
+                .append(installLog.toAbsolutePath()).append("\n");
+        }
+        return hint.toString();
     }
 
     /** 往已存在的版本 JSON 里写入 sclModpack 显示信息 */

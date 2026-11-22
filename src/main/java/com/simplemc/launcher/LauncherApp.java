@@ -19,6 +19,9 @@ import javafx.stage.Stage;
 public class LauncherApp extends Application {
 
     private Config config;
+
+    /** 目录自检结果（供界面提示用） */
+    private com.simplemc.launcher.core.DirRepair.Result repairResult;
     private MainWindow window;
     private SplashScreen splash;
 
@@ -35,6 +38,9 @@ public class LauncherApp extends Application {
         Constants.ensureDirectories();
         config = new Config();
 
+        // 应用代理设置：下载器与 NeoForge/Forge 安装器都会用到
+        com.simplemc.launcher.util.ProxyUtil.applyFromConfig(config);
+
         // 应用已保存的下载线程数
         String savedThreads = config.getString("download_threads");
         int threads = 8;
@@ -47,6 +53,10 @@ public class LauncherApp extends Application {
         com.simplemc.launcher.util.Downloader.setDefaultConnections(threads);
         Log.info("启动日志: 下载线程数=" + threads
                 + (Constants.useRoundedCorners() ? ", 圆角界面" : ", 直角界面"));
+
+        // 目录完整性自检：补回被误删的 .minecraft 及其子目录
+        var repair = com.simplemc.launcher.core.DirRepair.checkAndRepair();
+        this.repairResult = repair;
 
         // 先显示闪屏
         splash = new SplashScreen();

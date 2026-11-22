@@ -506,9 +506,10 @@ public final class SettingsPage {
                 .set("download_threads", String.valueOf(threadsSpinner.getValue()))
                 .set("download_source", downloadSourceCombo.getValue())
                 .save();
-        // 立即生效：更新下载器的并发数
+        // 立即生效：更新下载器的并发数与代理
         com.simplemc.launcher.util.Downloader.setDefaultConnections(
                 threadsSpinner.getValue());
+        com.simplemc.launcher.util.ProxyUtil.apply(proxyField.getText());
         alert(Alert.AlertType.INFORMATION,
                 "设置已保存（下载线程数：" + threadsSpinner.getValue() + "）");
         Log.info("设置已保存, 下载线程=" + threadsSpinner.getValue()

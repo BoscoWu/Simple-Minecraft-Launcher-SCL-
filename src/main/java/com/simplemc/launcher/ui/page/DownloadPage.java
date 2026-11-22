@@ -17,7 +17,6 @@ import javafx.scene.image.ImageView;
 import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 
-import javax.imageio.ImageIO;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -162,6 +161,56 @@ public final class DownloadPage {
         return page;
     }
 
+    /**
+     * 调用 Python 脚本对版本清单分组，返回愚人节版本 ID 集合。
+     *
+     * <p>这是「多语言混编」的接入点：版本分类这类纯逻辑交给 Python，
+     * Java 只负责界面。Python 不可用时返回 null，调用方回退 Java 实现。</p>
+     *
+     * @return 成功返回集合；Python 不可用或失败返回 null
+     */
+    private java.util.Set<String> classifyByPython(List<VersionManager.VersionInfo> all) {
+        if (!com.simplemc.launcher.util.PyBridge.isAvailable()) return null;
+        try {
+            // 构造请求 JSON
+            com.fasterxml.jackson.databind.ObjectMapper mapper =
+                    new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.node.ObjectNode req =
+                    mapper.createObjectNode();
+            req.put("action", "classify");
+            com.fasterxml.jackson.databind.node.ArrayNode arr =
+                    mapper.createArrayNode();
+            for (VersionManager.VersionInfo v : all) {
+                com.fasterxml.jackson.databind.node.ObjectNode o =
+                        mapper.createObjectNode();
+                o.put("id", v.id());
+                o.put("type", v.type());
+                o.put("releaseTime", v.releaseTime());
+                arr.add(o);
+            }
+            req.set("versions", arr);
+
+            com.fasterxml.jackson.databind.JsonNode r =
+                    com.simplemc.launcher.util.PyBridge.call(
+                            mapper.writeValueAsString(req));
+            if (r == null) return null;
+
+            com.fasterxml.jackson.databind.JsonNode april =
+                    r.path("groups").path("april");
+            if (!april.isArray()) return null;
+
+            java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+            for (com.fasterxml.jackson.databind.JsonNode idNode : april) {
+                ids.add(idNode.asText());
+            }
+            Log.info("版本分组由 Python 完成，愚人节版 " + ids.size() + " 个");
+            return ids;
+        } catch (Exception e) {
+            Log.warn("Python 分组失败，回退 Java: " + e.getMessage());
+            return null;
+        }
+    }
+
     /** 按 4 组渲染版本列表（正式版/预览版/远古版/愚人节版） */
     private void renderVersionGroups(List<VersionManager.VersionInfo> all) {
         versionListBox.getChildren().clear();
@@ -172,13 +221,19 @@ public final class DownloadPage {
         groups.put("远古版", new ArrayList<>());
         groups.put("愚人节版", new ArrayList<>());
 
+        // 分组逻辑优先交给 Python（混编）：把清单传给脚本，由它判定愚人节版本。
+        // 没装 Python 或调用失败时自动回退到下面的 Java 实现。
+        java.util.Set<String> aprilIds = classifyByPython(all);
+
         for (VersionManager.VersionInfo v : all) {
             String type = v.type();
             if ("release".equals(type)) {
                 groups.get("正式版").add(v);
             } else if ("snapshot".equals(type)) {
-                // 4 月 1 日发布的一律归为愚人节版
-                if (isAprilFools(v.id(), v.releaseTime())) {
+                boolean april = aprilIds != null
+                        ? aprilIds.contains(v.id())
+                        : isAprilFools(v.id(), v.releaseTime());
+                if (april) {
                     groups.get("愚人节版").add(v);
                 } else {
                     groups.get("预览版").add(v);
@@ -1058,22 +1113,27 @@ public final class DownloadPage {
             final String iconUrl = hit.iconUrl();
             CompletableFuture.runAsync(() -> {
                 try {
-                    // Modrinth 图标是 .webp，JavaFX 的 Image 不支持 WebP，
-                    // 必须走 ImageIO（配合 webp-imageio 依赖）解码后转成 JavaFX Image
                     byte[] data = loadImageBytes(iconUrl);
                     if (data == null || data.length == 0) {
                         Log.warn("图标下载失败: " + iconUrl);
                         return;
                     }
-                    java.awt.image.BufferedImage buf = ImageIO.read(
-                            new java.io.ByteArrayInputStream(data));
-                    if (buf == null) {
-                        Log.warn("图标解码失败（不支持的格式）: " + iconUrl);
+
+                    // Modrinth 图标是 WebP，JavaFX 的 Image 不认。
+                    // 先尝试用 Python + Pillow 转成 PNG（混编），
+                    // 失败再退回 JavaFX 原生解码，仍失败就保留占位图。
+                    byte[] png = com.simplemc.launcher.util.PyBridge.decodeWebp(data, 48);
+                    byte[] toDecode = png != null ? png : data;
+
+                    javafx.scene.image.Image img = new javafx.scene.image.Image(
+                            new java.io.ByteArrayInputStream(toDecode), 48, 48,
+                            true, true);
+                    if (img.isError() || img.getWidth() <= 0) {
+                        Log.warn("图标格式不支持，使用占位图: " + iconUrl);
                         return;
                     }
-                    javafx.scene.image.WritableImage fxImg = toFxImage(buf, 48);
                     Platform.runLater(() -> {
-                        ImageView iv = new ImageView(fxImg);
+                        ImageView iv = new ImageView(img);
                         iv.setFitWidth(48);
                         iv.setFitHeight(48);
                         iv.setPreserveRatio(true);
@@ -1118,38 +1178,111 @@ public final class DownloadPage {
     }
 
     private void doDownloadMod(Modrinth.Hit hit, String category) {
+        showVersionChoice(hit, category);
+    }
+
+    // ---------------- 版本选择 + 按类型安装 ----------------
+
+    /**
+     * 弹出「版本选择页」：先让用户选目标版本，再下载。
+     *
+     * <p>下载页的五类内容（模组/整合包/数据包/资源包/光影包）都走这里。</p>
+     */
+    private void showVersionChoice(Modrinth.Hit hit, String category) {
+        // 整合包：不需要选已安装版本，直接按项目自身依赖装成独立实例
+        if ("整合包".equals(category)) {
+            doInstallModpack(hit);
+            return;
+        }
+
+        String titleText = switch (category) {
+            case "模组" -> "选择安装模组的版本";
+            case "数据包" -> "选择目标世界所在的版本";
+            case "资源包" -> "选择安装资源包的版本";
+            case "光影包" -> "选择安装光影包的版本";
+            default -> "选择版本";
+        };
+
+        CompletableFuture.runAsync(() -> {
+            List<String> installed = versionManager.installedVersions();
+            Platform.runLater(() -> {
+                VersionPicker picker = new VersionPicker();
+                VBox pickPage = picker.build(titleText, hit, installed,
+                        // 返回：重新显示对应分类页
+                        () -> showCategory(category),
+                        // 选中版本
+                        (versionId, isInstalled) -> {
+                            if (!isInstalled) {
+                                alert(Alert.AlertType.INFORMATION,
+                                        "该版本尚未安装。\n请先到「游戏」分类安装 "
+                                        + versionId + "，再回来下载 " + category + "。");
+                                return;
+                            }
+                            doDownloadToVersion(hit, category, versionId);
+                        });
+                contentArea.getChildren().setAll(pickPage);
+            });
+        });
+    }
+
+    /**
+     * 把内容下载到指定版本的对应目录。
+     *
+     * <p>目录约定（版本隔离）：</p>
+     * <ul>
+     *   <li>模组 → {@code versions/<id>/mods}</li>
+     *   <li>资源包 → {@code versions/<id>/resourcepacks}</li>
+     *   <li>光影包 → {@code versions/<id>/shaderpacks}</li>
+     *   <li>数据包 → 让用户选具体世界目录</li>
+     * </ul>
+     */
+    private void doDownloadToVersion(Modrinth.Hit hit, String category, String versionId) {
         CompletableFuture.runAsync(() -> {
             try {
                 Platform.runLater(() -> window.setProgress(
                         "获取 " + hit.title() + " 的下载地址...", 0.2, ""));
 
-                String gameVer = config.getString("current_version");
-                String baseVer = new InstanceManager(Constants.MC_DIR)
-                        .resolveBaseVersion(gameVer);
-                String loader = "";
-                try {
-                    var j = versionManager.readVersionJson(gameVer);
-                    if (j.toString().toLowerCase().contains("fabric")) loader = "fabric";
-                    else if (j.toString().toLowerCase().contains("forge")) loader = "forge";
-                    else if (j.toString().toLowerCase().contains("quilt")) loader = "quilt";
-                } catch (Exception ignored) {}
+                String baseVer = InstancePaths.baseVersionOf(versionId);
+                String loader = InstancePaths.loaderOf(versionId);
 
-                Modrinth.FileEntry file = Modrinth.latestFile(hit.slug(), baseVer,
-                        loader.isBlank() ? null : loader);
+                // 资源包/光影包与原版无关，不需要按加载器过滤
+                String loaderFilter = switch (category) {
+                    case "资源包", "光影包", "数据包" -> null;
+                    default -> loader.isBlank() ? null : loader;
+                };
+                String versionFilter = switch (category) {
+                    case "光影包" -> null;      // 光影包不限制游戏版本
+                    default -> baseVer;
+                };
+
+                Modrinth.FileEntry file = Modrinth.fileFor(hit.slug(),
+                        versionFilter, loaderFilter);
                 if (file == null) {
                     Platform.runLater(() -> alert(Alert.AlertType.WARNING,
-                            "没有找到适用于当前版本的 " + category));
+                            "没有找到适用于 " + baseVer + " 的" + category));
                     return;
                 }
 
-                String sub = switch (category) {
-                    case "模组" -> "mods";
-                    case "资源包" -> "resourcepacks";
-                    case "光影包" -> "shaderpacks";
-                    case "数据包" -> "datapacks";
-                    default -> "mods";
-                };
-                Path dest = Constants.MC_DIR.resolve(sub).resolve(file.filename());
+                // 数据包：需要用户选目标世界
+                Path dest;
+                if ("数据包".equals(category)) {
+                    Path worldDir = chooseWorldDir(versionId);
+                    if (worldDir == null) {
+                        Platform.runLater(() -> window.setProgress("已取消", 0, "0%"));
+                        return;
+                    }
+                    dest = worldDir.resolve("datapacks").resolve(file.filename());
+                } else {
+                    String sub = switch (category) {
+                        case "模组" -> InstancePaths.MODS;
+                        case "资源包" -> InstancePaths.RESOURCEPACKS;
+                        case "光影包" -> InstancePaths.SHADERPACKS;
+                        default -> InstancePaths.MODS;
+                    };
+                    Path dir = InstancePaths.ensureContentDir(versionId, sub);
+                    dest = dir.resolve(file.filename());
+                }
+
                 Files.createDirectories(dest.getParent());
 
                 Platform.runLater(() -> window.setProgress(
@@ -1161,15 +1294,227 @@ public final class DownloadPage {
                             String.format("%.0f%%", f * 100)));
                 }, file.sha1());
 
+                Log.info(category + " 已下载到 " + dest);
                 Platform.runLater(() -> {
                     window.setProgress("下载完成: " + file.filename(), 1.0, "100%");
-                    alert(Alert.AlertType.INFORMATION, "已下载到:\n" + dest);
+                    alert(Alert.AlertType.INFORMATION,
+                            category + "已安装到：\n" + dest.getParent()
+                            + "\n\n目标版本：" + versionId);
                 });
             } catch (Exception e) {
                 Log.error("下载失败", e);
                 Platform.runLater(() -> {
                     window.setProgress("下载失败", 0, "0%");
                     alert(Alert.AlertType.ERROR, "下载失败:\n" + e.getMessage());
+                });
+            }
+        });
+    }
+
+    /** 让用户选择一个世界目录（数据包要装到世界的 datapacks 里） */
+    private Path chooseWorldDir(String versionId) {
+        Path[] result = new Path[1];
+        java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+
+        Platform.runLater(() -> {
+            try {
+                // 优先列出版本目录下的 saves，其次 .minecraft/saves
+                List<Path> worlds = new ArrayList<>();
+                Path iso = InstancePaths.versionDir(versionId).resolve("saves");
+                Path shared = Constants.MC_DIR.resolve("saves");
+                for (Path p : new Path[]{iso, shared}) {
+                    if (Files.isDirectory(p)) {
+                        try (var s = Files.list(p)) {
+                            s.filter(Files::isDirectory).forEach(worlds::add);
+                        }
+                    }
+                }
+
+                if (worlds.isEmpty()) {
+                    alert(Alert.AlertType.WARNING,
+                            "没有找到任何世界存档。\n请先在游戏里创建世界，再安装数据包。");
+                    return;
+                }
+
+                // 用覆盖层让用户选
+                javafx.scene.layout.BorderPane overlay =
+                        new javafx.scene.layout.BorderPane();
+                overlay.setStyle("-fx-background-color: " + Theme.BG + ";");
+
+                VBox top = new VBox(6);
+                top.setPadding(new Insets(14, 16, 8, 16));
+                HBox topRow = new HBox(8);
+                topRow.setAlignment(Pos.CENTER_LEFT);
+                Button back = new Button("←");
+                back.setStyle("-fx-background-color: transparent; -fx-font-size: 18px;"
+                        + "-fx-text-fill: " + Theme.TEXT_MUTED + "; -fx-cursor: hand;");
+                back.setOnAction(e -> {
+                    window.closeOverlay();
+                    latch.countDown();
+                });
+                Label t = new Label("选择要安装数据包的世界");
+                t.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;"
+                        + "-fx-text-fill: " + Theme.TEXT + ";");
+                topRow.getChildren().addAll(back, t);
+                top.getChildren().add(topRow);
+                overlay.setTop(top);
+
+                VBox list = new VBox(6);
+                list.setPadding(new Insets(0, 16, 16, 16));
+                for (Path w : worlds) {
+                    HBox row = new HBox(10);
+                    row.setAlignment(Pos.CENTER_LEFT);
+                    row.setPadding(new Insets(11, 14, 11, 14));
+                    row.setMaxWidth(Double.MAX_VALUE);
+                    row.setStyle("-fx-background-color: white; -fx-background-radius: 8;"
+                            + "-fx-border-color: " + Theme.BORDER_LIGHT + ";"
+                            + "-fx-border-radius: 8; -fx-cursor: hand;");
+                    Label n = new Label("🌍  " + w.getFileName());
+                    n.setStyle("-fx-font-size: 13px; -fx-text-fill: " + Theme.TEXT + ";");
+                    Region sp = new Region();
+                    HBox.setHgrow(sp, Priority.ALWAYS);
+                    Label p = new Label(w.toString());
+                    p.setStyle("-fx-font-size: 10.5px; -fx-text-fill: "
+                            + Theme.TEXT_MUTED + ";");
+                    row.getChildren().addAll(n, sp, p);
+                    row.setOnMouseClicked(e -> {
+                        result[0] = w;
+                        window.closeOverlay();
+                        latch.countDown();
+                    });
+                    row.setOnMouseEntered(e -> row.setStyle(
+                            "-fx-background-color: #e9f2fb; -fx-background-radius: 8;"
+                            + "-fx-border-color: " + Theme.PRIMARY + ";"
+                            + "-fx-border-radius: 8; -fx-cursor: hand;"));
+                    row.setOnMouseExited(e -> row.setStyle(
+                            "-fx-background-color: white; -fx-background-radius: 8;"
+                            + "-fx-border-color: " + Theme.BORDER_LIGHT + ";"
+                            + "-fx-border-radius: 8; -fx-cursor: hand;"));
+                    list.getChildren().add(row);
+                }
+                ScrollPane sp = new ScrollPane(list);
+                sp.setFitToWidth(true);
+                sp.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
+                overlay.setCenter(sp);
+
+                window.showOverlay(overlay);
+            } catch (Exception e) {
+                Log.warn("列世界失败: " + e.getMessage());
+                latch.countDown();
+            }
+        });
+
+        try {
+            // 最多等 3 分钟（用户可能在慢慢选）
+            if (!latch.await(3, java.util.concurrent.TimeUnit.MINUTES)) {
+                return null;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        return result[0];
+    }
+
+    /**
+     * 整合包：按项目自身的依赖装成一个独立实例。
+     *
+     * <p>与「导入本地整合包」不同，这里走 Modrinth 在线安装：
+     * 先确定项目声明的 MC 版本与加载器，再创建实例。</p>
+     */
+    private void doInstallModpack(Modrinth.Hit hit) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                Platform.runLater(() -> window.setProgress(
+                        "获取 " + hit.title() + " 的版本信息...", 0.2, ""));
+
+                // 取最新版本，读出它声明的 MC 版本与加载器
+                var versions = Modrinth.versions(hit.slug());
+                if (!versions.isArray() || versions.isEmpty()) {
+                    Platform.runLater(() -> alert(Alert.AlertType.WARNING,
+                            "该项目没有可用版本"));
+                    return;
+                }
+                var first = versions.path(0);
+                String mcVer = "";
+                var gv = first.path("game_versions");
+                if (gv.isArray() && gv.size() > 0) mcVer = gv.path(0).asText("");
+                String loader = "";
+                var ls = first.path("loaders");
+                if (ls.isArray()) {
+                    for (var l : ls) {
+                        String s = l.asText("").toLowerCase();
+                        if (!s.isBlank() && !"minecraft".equals(s)) {
+                            loader = s;
+                            break;
+                        }
+                    }
+                }
+                if (mcVer.isBlank()) {
+                    Platform.runLater(() -> alert(Alert.AlertType.WARNING,
+                            "无法确定整合包所需的 Minecraft 版本"));
+                    return;
+                }
+
+                final String fMc = mcVer;
+                final String fLoader = loader;
+                Platform.runLater(() -> {
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+                    confirm.setTitle("安装整合包");
+                    confirm.setHeaderText(hit.title());
+                    confirm.setContentText("将安装为独立实例：\n"
+                            + "  Minecraft " + fMc
+                            + (fLoader.isBlank() ? "" : "\n  加载器 " + fLoader)
+                            + "\n\n继续？");
+                    confirm.initOwner(window.stage());
+                    confirm.showAndWait().ifPresent(bt -> {
+                        if (bt == javafx.scene.control.ButtonType.OK) {
+                            installModpackInstance(hit, fMc, fLoader);
+                        }
+                    });
+                });
+            } catch (Exception e) {
+                Log.error("整合包信息获取失败", e);
+                Platform.runLater(() -> alert(Alert.AlertType.ERROR,
+                        "获取整合包信息失败:\n" + e.getMessage()));
+            }
+        });
+    }
+
+    /** 真正创建整合包实例 */
+    private void installModpackInstance(Modrinth.Hit hit, String mcVer, String loader) {
+        CompletableFuture.runAsync(() -> {
+            java.util.concurrent.atomic.AtomicInteger step =
+                    new java.util.concurrent.atomic.AtomicInteger(0);
+            try {
+                Platform.runLater(() -> window.setProgress(
+                        "安装基础版本 " + mcVer + "...", 0.1, ""));
+
+                InstanceManager im = new InstanceManager(Constants.MC_DIR);
+                // 安装基础版本 + 加载器
+                String baseId = im.installBase(mcVer, loader, "", s -> {
+                    int st = step.incrementAndGet();
+                    Platform.runLater(() -> window.setProgress(s,
+                            Math.min(0.85, 0.1 + st * 0.05), ""));
+                });
+
+                Platform.runLater(() -> window.setProgress(
+                        "创建整合包实例...", 0.88, ""));
+                String instanceId = im.createInstance(baseId, hit.title(), loader);
+
+                Platform.runLater(() -> {
+                    window.setProgress("整合包安装完成: " + instanceId, 1.0, "100%");
+                    alert(Alert.AlertType.INFORMATION,
+                            "整合包已安装为独立实例：\n" + instanceId
+                            + "\n\n可到「启动」页的「实例选择」中切换。");
+                });
+                Log.info("整合包实例已创建: " + instanceId);
+            } catch (Exception e) {
+                Log.error("整合包安装失败", e);
+                Platform.runLater(() -> {
+                    window.setProgress("安装失败", 0, "0%");
+                    alert(Alert.AlertType.ERROR, "整合包安装失败:\n" + e.getMessage());
                 });
             }
         });
@@ -1196,42 +1541,6 @@ public final class DownloadPage {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    /**
-     * BufferedImage -> JavaFX Image（顺便做高质量缩放）。
-     */
-    private static javafx.scene.image.WritableImage toFxImage(
-            java.awt.image.BufferedImage buf, int size) {
-        // 先缩放到目标尺寸（保持宽高比，居中填充正方形）
-        java.awt.image.BufferedImage scaled =
-                new java.awt.image.BufferedImage(size, size,
-                        java.awt.image.BufferedImage.TYPE_INT_ARGB);
-        java.awt.Graphics2D g = scaled.createGraphics();
-        try {
-            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
-                    java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING,
-                    java.awt.RenderingHints.VALUE_RENDER_QUALITY);
-            int sw = buf.getWidth(), sh = buf.getHeight();
-            double scale = Math.min((double) size / sw, (double) size / sh);
-            int dw = Math.max(1, (int) Math.round(sw * scale));
-            int dh = Math.max(1, (int) Math.round(sh * scale));
-            int dx = (size - dw) / 2, dy = (size - dh) / 2;
-            g.drawImage(buf, dx, dy, dw, dh, null);
-        } finally {
-            g.dispose();
-        }
-        javafx.scene.image.WritableImage fx =
-                new javafx.scene.image.WritableImage(size, size);
-        javafx.scene.image.PixelWriter pw = fx.getPixelWriter();
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                int argb = scaled.getRGB(x, y);
-                pw.setArgb(x, y, argb);
-            }
-        }
-        return fx;
     }
 
     private void alert(Alert.AlertType type, String msg) {

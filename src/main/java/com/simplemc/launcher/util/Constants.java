@@ -12,20 +12,29 @@ public final class Constants {
 
     public static final String APP_NAME = "极简 MC 启动器";
     public static final String APP_TITLE = "极简 MC 启动器";
-    public static final String VERSION = "v5.1.0";
+    public static final String VERSION = "v5.2.0";
 
     public static final String REPO_OWNER = "BoscoWu";
     public static final String REPO_NAME = "Simple-Minecraft-Launcher-SCL-";
 
-    /** GitHub 加速镜像（已剔除会跳广告站的 ghps.cc） */
+    /**
+     * GitHub 加速镜像（已剔除会跳广告站的 ghps.cc）。
+     *
+     * <p>顺序按 2026-11 实测的 releases/download 可用性排列：
+     * ghfast.top 最快且稳定，ghproxy.net 慢但可用，
+     * gh-proxy.com 对 download 路径返回 403 所以排最后作兜底。</p>
+     */
     public static final String[] GH_MIRRORS = {
-        "https://gh-proxy.com/",
-        "https://ghproxy.net/",
         "https://ghfast.top/",
+        "https://ghproxy.net/",
+        "https://gh-proxy.com/",
     };
 
     /** 黑名单镜像：无论如何都不使用 */
     public static final String[] MIRROR_BLACKLIST = { "ghps.cc" };
+
+    /** 更新检查用的第三方 GitHub 数据代理（绕过 api.github.com 被阻断/403 的问题） */
+    public static final String UNGH_API = "https://ungh.cc/repos";
 
     public static final String USER_AGENT = "SimpleMCLauncher/" + VERSION;
 

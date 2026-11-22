@@ -54,6 +54,15 @@ public final class Http {
         return client().send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
+    /** 拉取纯文本（用于非 JSON 接口，如 ungh.cc） */
+    public static String getText(String url, Duration timeout) throws Exception {
+        HttpResponse<byte[]> resp = get(url, timeout, null);
+        if (resp.statusCode() != 200) {
+            throw new RuntimeException("HTTP " + resp.statusCode());
+        }
+        return new String(resp.body(), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     /** 拉取 JSON */
     public static JsonNode fetchJson(String url) throws Exception {
         return fetchJson(url, Duration.ofSeconds(25), null);

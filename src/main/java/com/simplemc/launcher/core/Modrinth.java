@@ -159,6 +159,59 @@ public final class Modrinth {
                 Duration.ofSeconds(20), null);
     }
 
+    /**
+     * 获取某个项目支持的所有游戏版本（按 Modrinth 返回顺序，最新在前）。
+     *
+     * <p>用于「版本选择页」：把项目支持的版本与本地已安装版本求交集，
+     * 得到「当前适配的版本」。</p>
+     */
+    public static List<String> supportedGameVersions(String slugOrId) throws Exception {
+        JsonNode arr = versions(slugOrId);
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+        if (arr.isArray()) {
+            for (JsonNode v : arr) {
+                JsonNode gv = v.path("game_versions");
+                if (gv.isArray()) {
+                    for (JsonNode g : gv) {
+                        String s = g.asText("");
+                        if (!s.isBlank()) set.add(s);
+                    }
+                }
+            }
+        }
+        return new ArrayList<>(set);
+    }
+
+    /**
+     * 获取某个项目支持的所有加载器（小写）。
+     */
+    public static List<String> supportedLoaders(String slugOrId) throws Exception {
+        JsonNode arr = versions(slugOrId);
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+        if (arr.isArray()) {
+            for (JsonNode v : arr) {
+                JsonNode ls = v.path("loaders");
+                if (ls.isArray()) {
+                    for (JsonNode l : ls) {
+                        String s = l.asText("").toLowerCase();
+                        if (!s.isBlank()) set.add(s);
+                    }
+                }
+            }
+        }
+        return new ArrayList<>(set);
+    }
+
+    /**
+     * 按指定游戏版本 + 加载器取文件。
+     *
+     * @return 找不到返回 null
+     */
+    public static FileEntry fileFor(String slugOrId, String gameVersion, String loader)
+            throws Exception {
+        return latestFile(slugOrId, gameVersion, loader);
+    }
+
     /** 下载量格式化 */
     public static String formatDownloads(long n) {
         if (n >= 100_000_000L) return String.format("%.1f亿", n / 100_000_000.0);

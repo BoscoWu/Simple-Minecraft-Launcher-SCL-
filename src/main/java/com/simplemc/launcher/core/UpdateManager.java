@@ -36,46 +36,138 @@ public final class UpdateManager {
 
     /**
      * 检查更新。
+     *
+     * <p>顺序很重要：<b>先试不需要镜像的第三方 API 代理</b>，
+     * 再试镜像 + api.github.com，最后才试直连。</p>
+     *
+     * <p>为什么不能只靠镜像：实测 gh-proxy / ghproxy.net / ghfast.top
+     * 访问 {@code api.github.com} 全部返回 403（它们只代理
+     * releases/download 这类文件路径，不代理 API）。
+     * 而直连 {@code api.github.com} 在部分网络下是 SSL 阻断。
+     * 所以主路径改用 ungh.cc —— 它把 GitHub 的 release 数据转成
+     * 简洁 JSON，且返回标准的 downloadUrl，可直接交给下载器。</p>
      */
     public static CheckResult check() {
+        Exception last = null;
+
+        // ---- 路径 1：ungh.cc（第三方 GitHub 数据代理，实测最快最稳）----
+        try {
+            CheckResult r = checkViaUngh();
+            if (r != null) return r;
+        } catch (Exception e) {
+            last = e;
+            Log.warn("ungh.cc 检查失败: " + e.getMessage());
+        }
+
+        // ---- 路径 2：镜像 + api.github.com ----
         String apiPath = "https://api.github.com/repos/"
                 + Constants.REPO_OWNER + "/" + Constants.REPO_NAME + "/releases/latest";
-
-        JsonNode release = null;
-        Exception last = null;
         for (String mirror : Constants.GH_MIRRORS) {
             try {
-                release = Http.fetchJson(mirror + apiPath, Duration.ofSeconds(12), null);
-                if (release != null && release.has("tag_name")) break;
+                JsonNode release = Http.fetchJson(mirror + apiPath,
+                        Duration.ofSeconds(10), null);
+                if (release != null && release.has("tag_name")) {
+                    return fromGithubRelease(release);
+                }
             } catch (Exception e) {
                 last = e;
-                Log.warn("检查更新失败 " + mirror + ": " + e.getMessage());
+                Log.warn("镜像 API 失败 " + mirror + ": " + shortMsg(e));
             }
-        }
-        if (release == null) {
-            // 直连兜底
-            try {
-                release = Http.fetchJson(apiPath, Duration.ofSeconds(12), null);
-            } catch (Exception e) {
-                last = e;
-            }
-        }
-        if (release == null) {
-            return new CheckResult(false, Constants.VERSION, null, null, 0,
-                    "检查更新失败: " + (last == null ? "未知错误" : last.getMessage()));
         }
 
-        String tag = release.path("tag_name").asText("");
-        if (tag.isBlank()) {
-            return new CheckResult(false, Constants.VERSION, null, null, 0, "未获取到版本号");
+        // ---- 路径 3：直连 api.github.com ----
+        try {
+            JsonNode release = Http.fetchJson(apiPath, Duration.ofSeconds(12), null);
+            if (release != null && release.has("tag_name")) {
+                return fromGithubRelease(release);
+            }
+        } catch (Exception e) {
+            last = e;
+            Log.warn("直连 API 失败: " + shortMsg(e));
         }
+
+        Log.warn("检查更新失败: 所有渠道均不可用");
+        return new CheckResult(false, Constants.VERSION, null, null, 0,
+                "检查更新失败（网络受限，可手动到 GitHub Releases 查看）");
+    }
+
+    /** 把异常压成一行，避免 403 的长 URL 刷屏 */
+    private static String shortMsg(Exception e) {
+        String m = e.getMessage();
+        if (m == null) return e.getClass().getSimpleName();
+        return m.length() > 80 ? m.substring(0, 80) + "..." : m;
+    }
+
+    /**
+     * 通过 ungh.cc 检查更新。
+     *
+     * <p>返回 null 表示该渠道不可用，调用方继续试下一个。</p>
+     */
+    private static CheckResult checkViaUngh() throws Exception {
+        String url = Constants.UNGH_API + "/" + Constants.REPO_OWNER
+                + "/" + Constants.REPO_NAME + "/releases";
+
+        // 用 Downloader 的共享 HttpClient（带超时、跟随重定向）
+        String body = Http.getText(url, Duration.ofSeconds(12));
+        if (body == null || body.isBlank()) return null;
+
+        JsonNode root = Http.MAPPER.readTree(body);
+        JsonNode releases = root.path("releases");
+        if (!releases.isArray() || releases.size() == 0) return null;
+
+        // 取第一个非 draft、非 prerelease 的
+        JsonNode latest = null;
+        for (JsonNode rel : releases) {
+            if (rel.path("draft").asBoolean(false)) continue;
+            if (rel.path("prerelease").asBoolean(false)) continue;
+            latest = rel;
+            break;
+        }
+        if (latest == null) latest = releases.path(0);
+
+        String tag = latest.path("tag").asText("");
+        if (tag.isBlank()) return null;
 
         if (compareVersions(tag, Constants.VERSION) <= 0) {
             return new CheckResult(false, tag, null, null, 0,
                     "当前已是最新版本 " + Constants.VERSION);
         }
 
-        // 找对应平台的资产
+        // 从 assets 里挑当前平台的
+        String wantExt = isWindows() ? ".exe" : (isMac() ? ".dmg" : ".deb");
+        JsonNode assets = latest.path("assets");
+        String dl = null, name = null;
+        long size = 0;
+        if (assets.isArray()) {
+            for (JsonNode a : assets) {
+                String u = a.path("downloadUrl").asText("");
+                if (u.toLowerCase().endsWith(wantExt)) {
+                    dl = u;
+                    name = u.substring(u.lastIndexOf('/') + 1);
+                    size = a.path("size").asLong(0);
+                    break;
+                }
+            }
+        }
+        if (dl == null) {
+            return new CheckResult(false, tag, null, null, 0,
+                    "发现新版本 " + tag + "，但没有适用于当前系统的安装包");
+        }
+        Log.info("发现新版本 " + tag + "（来源 ungh.cc）");
+        return new CheckResult(true, tag, dl, name, size,
+                "发现新版本 " + tag + "（当前 " + Constants.VERSION + "）");
+    }
+
+    /** 把 GitHub 的 release JSON 转成检查结果 */
+    private static CheckResult fromGithubRelease(JsonNode release) {
+        String tag = release.path("tag_name").asText("");
+        if (tag.isBlank()) {
+            return new CheckResult(false, Constants.VERSION, null, null, 0, "未获取到版本号");
+        }
+        if (compareVersions(tag, Constants.VERSION) <= 0) {
+            return new CheckResult(false, tag, null, null, 0,
+                    "当前已是最新版本 " + Constants.VERSION);
+        }
         String wantExt = isWindows() ? ".exe" : (isMac() ? ".dmg" : ".deb");
         JsonNode assets = release.path("assets");
         String url = null, name = null;
@@ -101,6 +193,9 @@ public final class UpdateManager {
 
     /**
      * 下载更新包。
+     *
+     * <p>实测各镜像对 releases/download 的支持不一致（gh-proxy 可能返回 403，
+     * ghfast 正常），因此把全部候选地址交给 Downloader 依次尝试。</p>
      */
     public static Path download(CheckResult result, Consumer<String> stage,
                                 Downloader.Progress progress) throws Exception {
@@ -111,17 +206,21 @@ public final class UpdateManager {
         stage.accept("下载更新 " + result.latestVersion() + "（"
                 + Downloader.humanSize(result.size()) + "）...");
 
-        // 组装镜像地址（过滤坏镜像）
+        String raw = result.downloadUrl();
         List<String> urls = new ArrayList<>();
+
+        // 镜像优先（国内直连 GitHub 文件常失败）
         for (String m : Constants.GH_MIRRORS) {
-            String full = m + result.downloadUrl();
-            if (!isBad(full)) urls.add(full);
+            String full = m + raw;
+            if (!isBad(full) && Http.isSafeUrl(full)) urls.add(full);
         }
-        // 只使用安全地址（白名单内）
-        urls.removeIf(u -> !Http.isSafeUrl(u));
+        // 官方直连兜底
+        if (Http.isSafeUrl(raw) && !urls.contains(raw)) urls.add(raw);
+
         if (urls.isEmpty()) {
             throw new IllegalStateException("没有安全的下载源可用");
         }
+        Log.info("更新包候选源: " + urls.size() + " 个");
 
         Downloader.download(urls, dest, progress, null);
         Log.info("更新包已下载: " + dest);

@@ -114,78 +114,89 @@ public final class InstanceManager {
         return importZip(archive, stage);
     }
 
-    /** 导入 Modrinth 整合包 */
+    /** 导入 Modrinth 整合包（.mrpack） */
     private String importMrpack(Path mrpack, java.util.function.Consumer<String> stage)
             throws Exception {
         stage.accept("读取整合包清单...");
         Path tempDir = Files.createTempDirectory("scl-mrpack-");
         try {
             unzipAll(mrpack, tempDir);
-
             Path indexFile = tempDir.resolve("modrinth.index.json");
             if (!Files.isRegularFile(indexFile)) {
                 throw new IllegalStateException("不是有效的 .mrpack（缺少 modrinth.index.json）");
             }
-            JsonNode index = Http.MAPPER.readTree(Files.readAllBytes(indexFile));
-
-            String packName = index.path("name").asText("整合包");
-            String mcVersion = index.path("dependencies").path("minecraft").asText("");
-            String loaderVersion = "";
-            String loaderType = "";
-            JsonNode deps = index.path("dependencies");
-            if (deps.has("fabric-loader")) {
-                loaderType = "fabric";
-                loaderVersion = deps.get("fabric-loader").asText();
-            } else if (deps.has("quilt-loader")) {
-                loaderType = "quilt";
-                loaderVersion = deps.get("quilt-loader").asText();
-            } else if (deps.has("forge")) {
-                loaderType = "forge";
-                loaderVersion = deps.get("forge").asText();
-            } else if (deps.has("neoforge")) {
-                loaderType = "neoforge";
-                loaderVersion = deps.get("neoforge").asText();
-            }
-
-            if (mcVersion.isBlank()) {
-                throw new IllegalStateException("整合包没有指定 Minecraft 版本");
-            }
-            stage.accept("整合包: " + packName + "（MC " + mcVersion
-                    + (loaderType.isBlank() ? "" : " / " + loaderType) + "）");
-
-            // 安装基础版本 + 加载器
-            String baseId = installBase(mcVersion, loaderType, loaderVersion, stage);
-
-            // 创建实例
-            String instanceId = createInstance(baseId, packName, loaderType);
-            Path instanceDir = mcDir.resolve("versions").resolve(instanceId);
-
-            // 下载 files 列表
-            JsonNode files = index.path("files");
-            List<JsonNode> toDownload = new ArrayList<>();
-            if (files.isArray()) {
-                for (JsonNode f : files) {
-                    String envClient = f.path("env").path("client").asText("required");
-                    if ("unsupported".equals(envClient)) continue;
-                    toDownload.add(f);
-                }
-            }
-
-            stage.accept("下载整合包内容（" + toDownload.size() + " 个文件）...");
-            downloadPackFiles(toDownload, instanceDir);
-
-            // 复制 overrides
-            copyOverrides(tempDir, instanceDir, "overrides", stage);
-            copyOverrides(tempDir, instanceDir, "client-overrides", stage);
-
-            // 记录实例元信息
-            updateInstanceMeta(instanceId, packName, loaderType, mcVersion);
-
-            stage.accept("整合包导入完成: " + packName);
-            return instanceId;
+            return importMrpackIndex(tempDir, indexFile, stage);
         } finally {
             deleteTree(tempDir);
         }
+    }
+
+    /**
+     * 按 modrinth.index.json 导入（.mrpack 与含该清单的 zip 共用）。
+     *
+     * @param tempDir   已解压的目录
+     * @param indexFile modrinth.index.json
+     */
+    private String importMrpackIndex(Path tempDir, Path indexFile,
+                                     java.util.function.Consumer<String> stage)
+            throws Exception {
+        JsonNode index = Http.MAPPER.readTree(Files.readAllBytes(indexFile));
+
+        String packName = index.path("name").asText("整合包");
+        String mcVersion = index.path("dependencies").path("minecraft").asText("");
+        String loaderVersion = "";
+        String loaderType = "";
+        JsonNode deps = index.path("dependencies");
+        if (deps.has("fabric-loader")) {
+            loaderType = "fabric";
+            loaderVersion = deps.get("fabric-loader").asText();
+        } else if (deps.has("quilt-loader")) {
+            loaderType = "quilt";
+            loaderVersion = deps.get("quilt-loader").asText();
+        } else if (deps.has("forge")) {
+            loaderType = "forge";
+            loaderVersion = deps.get("forge").asText();
+        } else if (deps.has("neoforge")) {
+            loaderType = "neoforge";
+            loaderVersion = deps.get("neoforge").asText();
+        }
+
+        if (mcVersion.isBlank()) {
+            throw new IllegalStateException("整合包没有指定 Minecraft 版本");
+        }
+        stage.accept("整合包: " + packName + "（MC " + mcVersion
+                + (loaderType.isBlank() ? "" : " / " + loaderType) + "）");
+
+        // 安装基础版本 + 加载器
+        String baseId = installBase(mcVersion, loaderType, loaderVersion, stage);
+
+        // 创建实例
+        String instanceId = createInstance(baseId, packName, loaderType);
+        Path instanceDir = mcDir.resolve("versions").resolve(instanceId);
+
+        // 下载 files 列表
+        JsonNode files = index.path("files");
+        List<JsonNode> toDownload = new ArrayList<>();
+        if (files.isArray()) {
+            for (JsonNode f : files) {
+                String envClient = f.path("env").path("client").asText("required");
+                if ("unsupported".equals(envClient)) continue;
+                toDownload.add(f);
+            }
+        }
+
+        stage.accept("下载整合包内容（" + toDownload.size() + " 个文件）...");
+        downloadPackFiles(toDownload, instanceDir);
+
+        // 复制 overrides
+        copyOverrides(tempDir, instanceDir, "overrides", stage);
+        copyOverrides(tempDir, instanceDir, "client-overrides", stage);
+
+        // 记录实例元信息
+        updateInstanceMeta(instanceId, packName, loaderType, mcVersion);
+
+        stage.accept("整合包导入完成: " + packName);
+        return instanceId;
     }
 
     private void downloadPackFiles(List<JsonNode> files, Path instanceDir) throws Exception {
@@ -246,25 +257,48 @@ public final class InstanceManager {
         try {
             unzipAll(zip, tempDir);
 
-            // CurseForge: manifest.json
+            // 1. CurseForge / Modrinth 清单
             Path cfManifest = tempDir.resolve("manifest.json");
             if (Files.isRegularFile(cfManifest)) {
                 return importCurseForge(zip, tempDir, cfManifest, stage);
             }
-            // 通用：猜测 MC 版本
-            String mcVersion = guessMcVersion(tempDir);
-            stage.accept("未找到整合包清单，按通用压缩包处理（MC " + mcVersion + "）");
-            String baseId = installBase(mcVersion, "", "", stage);
+            Path mrIndex = tempDir.resolve("modrinth.index.json");
+            if (Files.isRegularFile(mrIndex)) {
+                stage.accept("检测到 Modrinth 清单");
+                return importMrpackIndex(tempDir, mrIndex, stage);
+            }
+
+            // 2. 包内的 Forge / NeoForge 安装器（很多整合包直接附带安装器）
+            Path installer = findLoaderInstaller(tempDir);
+            String baseId;
+            if (installer != null) {
+                String jarName = installer.getFileName().toString();
+                stage.accept("检测到加载器安装器: " + jarName);
+                baseId = runBundledInstaller(installer, jarName, stage);
+            } else {
+                // 3. 通用：猜测 MC 版本，装原版
+                String mcVersion = guessMcVersion(tempDir);
+                stage.accept("未找到整合包清单，按通用压缩包处理（MC " + mcVersion + "）");
+                baseId = installBase(mcVersion, "", "", stage);
+            }
+
             String instanceId = createInstance(baseId,
                     zip.getFileName().toString().replaceAll("\\.[^.]+$", ""), "");
             Path instanceDir = mcDir.resolve("versions").resolve(instanceId);
 
             stage.accept("解压内容到实例目录...");
+            // 跳过安装器本身和清单，避免把 jar 塞进实例根目录
+            String installerName = installer == null ? null : installer.getFileName().toString();
             try (var s = Files.walk(tempDir)) {
                 s.forEach(p -> {
                     try {
                         Path rel = tempDir.relativize(p);
                         if (rel.toString().isEmpty()) return;
+                        String first = rel.getName(0).toString();
+                        if ("manifest.json".equals(first)
+                                || "modrinth.index.json".equals(first)) return;
+                        if (installerName != null
+                                && rel.toString().equals(installerName)) return;
                         Path dst = instanceDir.resolve(rel);
                         if (Files.isDirectory(p)) Files.createDirectories(dst);
                         else {
@@ -278,6 +312,135 @@ public final class InstanceManager {
             return instanceId;
         } finally {
             deleteTree(tempDir);
+        }
+    }
+
+    /**
+     * 在解压目录里找 Forge / NeoForge 的安装器 jar。
+     *
+     * <p>识别规则：文件名同时含加载器名与 installer / `universal` / 典型版本号。</p>
+     */
+    private Path findLoaderInstaller(Path dir) {
+        try (var s = Files.walk(dir, 3)) {
+            return s.filter(Files::isRegularFile)
+                    .filter(p -> p.toString().toLowerCase().endsWith(".jar"))
+                    .filter(p -> {
+                        String n = p.getFileName().toString().toLowerCase();
+                        boolean isLoader = n.contains("forge") || n.contains("neoforge");
+                        boolean isInstaller = n.contains("installer") || n.contains("universal");
+                        // 排除普通的 mod jar（比如 mods/ 目录下的）
+                        String path = p.toString().replace('\\', '/').toLowerCase();
+                        boolean inMods = path.contains("/mods/");
+                        return isLoader && isInstaller && !inMods;
+                    })
+                    .findFirst().orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 运行整合包自带的加载器安装器。
+     *
+     * @return 安装后的版本 ID
+     */
+    private String runBundledInstaller(Path installer, String jarName,
+                                       java.util.function.Consumer<String> stage)
+            throws Exception {
+        ensureLauncherProfiles();
+
+        var javas = JavaManager.detectAll();
+        var chosen = JavaManager.pickBest(javas, 17);
+        String javaBin = chosen != null ? chosen.path() : "java";
+
+        stage.accept("运行加载器安装器（可能需要几分钟）...");
+        ProcessBuilder pb = new ProcessBuilder(javaBin, "-jar",
+                installer.toAbsolutePath().toString(),
+                "--installClient",
+                mcDir.toAbsolutePath().toString());
+        pb.directory(mcDir.toFile());
+        pb.redirectErrorStream(true);
+        Path log = mcDir.resolve("logs").resolve("bundled-installer.log");
+        Files.createDirectories(log.getParent());
+        pb.redirectOutput(ProcessBuilder.Redirect.to(log.toFile()));
+
+        Process p = pb.start();
+        if (!p.waitFor(15, java.util.concurrent.TimeUnit.MINUTES)) {
+            p.destroyForcibly();
+            throw new IllegalStateException("整合包加载器安装超时");
+        }
+        if (p.exitValue() != 0) {
+            String tail = tailOf(log, 25);
+            throw new IllegalStateException("整合包加载器安装失败 (exit "
+                    + p.exitValue() + ")\n" + tail);
+        }
+
+        // 找最新生成的版本目录
+        String fromName = jarName.replaceAll("(?i)[-_]?(installer|universal)?\\.jar$", "");
+        String id = findNewestLoaderVersion();
+        stage.accept("加载器安装完成: " + (id != null ? id : fromName));
+        if (id != null) return id;
+        throw new IllegalStateException("安装器已运行但找不到生成的版本目录");
+    }
+
+    /** 在 versions/ 下找最近修改的 forge/neoforge 版本目录 */
+    private String findNewestLoaderVersion() {
+        Path vdir = mcDir.resolve("versions");
+        if (!Files.isDirectory(vdir)) return null;
+        try (var s = Files.list(vdir)) {
+            return s.filter(Files::isDirectory)
+                    .filter(p -> {
+                        String n = p.getFileName().toString().toLowerCase();
+                        return n.contains("forge") || n.contains("neoforge");
+                    })
+                    .filter(p -> Files.isRegularFile(
+                            p.resolve(p.getFileName() + ".json")))
+                    .max(java.util.Comparator.comparingLong(p -> {
+                        try {
+                            return Files.getLastModifiedTime(p).toMillis();
+                        } catch (Exception e) {
+                            return 0L;
+                        }
+                    }))
+                    .map(p -> p.getFileName().toString())
+                    .orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 确保 launcher_profiles.json 存在（Forge/NeoForge 安装器需要）。
+     */
+    private void ensureLauncherProfiles() {
+        try {
+            Files.createDirectories(mcDir);
+            Path file = mcDir.resolve("launcher_profiles.json");
+            if (Files.isRegularFile(file) && Files.size(file) > 10) {
+                try {
+                    Http.MAPPER.readTree(Files.readAllBytes(file));
+                    return;
+                } catch (Exception ignored) {
+                    // 损坏，重建
+                }
+            }
+            Files.writeString(file, "{\n"
+                    + "  \"profiles\": {},\n"
+                    + "  \"settings\": {\"enableSnapshots\": false,"
+                    + "\"enableAdvanced\": true, \"showMenu\": false},\n"
+                    + "  \"version\": 3\n}\n", StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            Log.warn("创建 launcher_profiles.json 失败: " + e.getMessage());
+        }
+    }
+
+    private static String tailOf(Path log, int lines) {
+        try {
+            var all = Files.readAllLines(log, StandardCharsets.UTF_8);
+            int from = Math.max(0, all.size() - lines);
+            return String.join("\n", all.subList(from, all.size()));
+        } catch (Exception e) {
+            return "(无法读取日志)";
         }
     }
 
@@ -347,7 +510,12 @@ public final class InstanceManager {
     }
 
     /** 安装基础版本 + 加载器，返回可用的版本 ID */
-    private String installBase(String mcVersion, String loaderType, String loaderVersion,
+    /**
+     * 安装基础版本 + 加载器，返回可用的版本 ID。
+     *
+     * <p>供整包在线安装等场景复用。加载器类型为空表示只装原版。</p>
+     */
+    public String installBase(String mcVersion, String loaderType, String loaderVersion,
                                java.util.function.Consumer<String> stage) throws Exception {
         VanillaInstaller vanilla = new VanillaInstaller(mcDir);
         VersionManager vm = new VersionManager(null);
