@@ -28,6 +28,7 @@ public class LauncherApp extends Application {
     public static void main(String[] args) {
         // 单实例检查
         Log.info("========== 极简 MC 启动器 " + Constants.VERSION + " 启动 ==========");
+        Log.info("程序目录: " + Constants.APP_DIR);
         Log.info("数据目录: " + Constants.DATA_DIR);
 
         launch(args);

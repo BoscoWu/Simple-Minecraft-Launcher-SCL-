@@ -7,7 +7,7 @@
 
     <groupId>com.simplemc</groupId>
     <artifactId>simplemc-launcher</artifactId>
-    <version>5.2.0</version>
+    <version>5.2.1</version>
     <packaging>jar</packaging>
 
     <name>Simple MC Launcher</name>

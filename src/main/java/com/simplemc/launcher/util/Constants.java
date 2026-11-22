@@ -12,7 +12,7 @@ public final class Constants {
 
     public static final String APP_NAME = "极简 MC 启动器";
     public static final String APP_TITLE = "极简 MC 启动器";
-    public static final String VERSION = "v5.2.0";
+    public static final String VERSION = "v5.2.1";
 
     public static final String REPO_OWNER = "BoscoWu";
     public static final String REPO_NAME = "Simple-Minecraft-Launcher-SCL-";
@@ -51,22 +51,60 @@ public final class Constants {
     public static final Path CONFIG_FILE = DATA_DIR.resolve("launcher_config.json");
     public static final Path LOG_FILE = DATA_DIR.resolve("launcher.log");
 
+    /**
+     * 解析应用根目录（便携版的顶层目录，pyLauncher 就放这里）。
+     *
+     * <p>jpackage 便携版的布局是：</p>
+     * <pre>
+     * SimpleMCLauncher/
+     * ├── SimpleMCLauncher.exe     <- jpackage.app-path 指向它
+     * ├── app/                     <- jar 在这里
+     * ├── runtime/                 <- 内置 Java
+     * └── pyLauncher/              <- 数据目录（我们要找的位置）
+     * </pre>
+     *
+     * <p>{@code jpackage.app-path} 是 {@code <root>/app/SimpleMCLauncher.exe}，
+     * 所以数据目录应该取它的<b>上两级</b>，而不是同级。</p>
+     */
     private static Path resolveAppDir() {
-        // jpackage 会设置 jpackage.app-path；普通 jar 用当前目录
+        // 1. 允许外部覆盖（调试时方便）
+        String override = System.getProperty("scl.app.dir");
+        if (override != null && !override.isBlank()) {
+            return Paths.get(override).toAbsolutePath();
+        }
+
+        // 2. jpackage 便携版：<root>/app/SimpleMCLauncher.exe -> 取上两级
         String appPath = System.getProperty("jpackage.app-path");
         if (appPath != null && !appPath.isBlank()) {
-            Path p = Paths.get(appPath).toAbsolutePath().getParent();
-            if (p != null) return p;
+            try {
+                Path exeDir = Paths.get(appPath).toAbsolutePath().getParent();
+                if (exeDir != null) {
+                    if ("app".equalsIgnoreCase(exeDir.getFileName().toString())
+                            && exeDir.getParent() != null) {
+                        return exeDir.getParent();
+                    }
+                    return exeDir;
+                }
+            } catch (Exception ignored) {
+            }
         }
-        // 从 jar 位置推断
+
+        // 3. 从 jar 位置推断（从源码/普通 jar 运行时）
         try {
             Path jar = Paths.get(Constants.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI());
             if (jar.toString().endsWith(".jar")) {
-                return jar.getParent();
+                Path dir = jar.getParent();
+                // target/SimpleMCLauncher.jar -> 回到项目根
+                if (dir != null && "target".equals(dir.getFileName().toString())
+                        && dir.getParent() != null) {
+                    return dir.getParent();
+                }
+                return dir;
             }
         } catch (Exception ignored) {
         }
+
         return Paths.get(System.getProperty("user.dir")).toAbsolutePath();
     }
 
