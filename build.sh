@@ -174,26 +174,92 @@ case "$OS" in
         ;;
 esac
 
+# ---------------------------------------------------------------
 # 验证产物结构
+#
+# 不同平台的 jpackage app-image 布局不一样：
+#   Windows: <pkg>/SimpleMCLauncher.exe + <pkg>/app/ + <pkg>/runtime/
+#   macOS:   <pkg>/<App>.app/...            （zip 里是 .app 包）
+#   Linux:   <pkg>/bin/ + <pkg>/lib/app/ + <pkg>/lib/runtime/
+# 所以按平台分别检查。
+# ---------------------------------------------------------------
 echo ""
 echo "==> 产物结构检查"
 PKG="$DIST_DIR/$APP_NAME"
-for d in "$PKG" "$PKG/app" "$PKG/runtime" "$PKG/pyLauncher"; do
-    if [ -d "$d" ]; then
-        echo "  OK   ${d#$DIST_DIR/}"
-    else
-        echo "  MISS ${d#$DIST_DIR/}"
-    fi
-done
+STRUCT_OK=1
 
-# 检查 app.classpath 是否正常（不能有子目录）
-CFG="$(find "$PKG/app" -maxdepth 1 -name "*.cfg" | head -1)"
+check_dir() {
+    if [ -d "$1" ]; then
+        echo "  OK   ${1#$DIST_DIR/}"
+    else
+        echo "  MISS ${1#$DIST_DIR/}"
+        STRUCT_OK=0
+    fi
+}
+
+case "$OS" in
+    MINGW*|MSYS*|CYGWIN*)
+        check_dir "$PKG"
+        check_dir "$PKG/app"
+        check_dir "$PKG/runtime"
+        check_dir "$PKG/pyLauncher"
+        if [ -f "$PKG/$APP_NAME.exe" ]; then
+            echo "  OK   ${PKG#$DIST_DIR/}/$APP_NAME.exe"
+        else
+            echo "  MISS $APP_NAME.exe"
+            STRUCT_OK=0
+        fi
+        ;;
+    Darwin)
+        check_dir "$PKG"
+        check_dir "$PKG/pyLauncher"
+        APP_BUNDLE="$(find "$PKG" -maxdepth 1 -name "*.app" | head -1)"
+        if [ -n "$APP_BUNDLE" ]; then
+            echo "  OK   ${APP_BUNDLE#$DIST_DIR/}"
+            check_dir "$APP_BUNDLE/Contents/app"
+            check_dir "$APP_BUNDLE/Contents/runtime"
+        else
+            echo "  MISS *.app"
+            STRUCT_OK=0
+        fi
+        ;;
+    Linux)
+        check_dir "$PKG"
+        check_dir "$PKG/bin"
+        check_dir "$PKG/lib/app"
+        check_dir "$PKG/lib/runtime"
+        check_dir "$PKG/pyLauncher"
+        if [ -x "$PKG/bin/$APP_NAME" ]; then
+            echo "  OK   ${PKG#$DIST_DIR/}/bin/$APP_NAME (可执行)"
+        else
+            echo "  MISS bin/$APP_NAME"
+            STRUCT_OK=0
+        fi
+        ;;
+esac
+
+if [ "$STRUCT_OK" -ne 1 ]; then
+    echo ""
+    echo "ERROR: 产物结构不完整"
+    exit 1
+fi
+
+# 检查 app.classpath 是否正常（不能有子目录，否则 jpackage 输入目录被污染）
+case "$OS" in
+    MINGW*|MSYS*|CYGWIN*) APP_DIR_FOR_CFG="$PKG/app" ;;
+    Darwin)               APP_DIR_FOR_CFG="$(find "$PKG" -maxdepth 3 -type d -name app | head -1)" ;;
+    Linux)                APP_DIR_FOR_CFG="$PKG/lib/app" ;;
+esac
+CFG="$(find "$APP_DIR_FOR_CFG" -maxdepth 1 -name "*.cfg" 2>/dev/null | head -1)"
 if [ -n "$CFG" ]; then
-    if grep -q "app.classpath=.*/" "$CFG"; then
-        echo "  WARN app.classpath 含子目录，可能导致启动失败"
+    if grep -q "app.classpath=.*[/\\\\]app[/\\\\]" "$CFG"; then
+        echo "  ERROR app.classpath 含嵌套子目录，启动会失败"
+        exit 1
     else
         echo "  OK   app.classpath 正常"
     fi
+else
+    echo "  WARN 未找到 .cfg 文件"
 fi
 
 echo ""

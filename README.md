@@ -7,20 +7,49 @@
 
 ## 下载
 
+**便携版，解压即用，无需安装。**
+
 | 平台 | 文件 |
 |------|------|
-| Windows | `SimpleMCLauncher-*-windows.zip` 或 `.exe` 安装包 |
-| macOS | `SimpleMCLauncher-*.dmg` |
-| Linux | `simplemc-launcher_*_amd64.deb` |
+| Windows | `SimpleMCLauncher-*-windows.zip` |
+| macOS | `SimpleMCLauncher-*-macos.zip` |
+| Linux | `SimpleMCLauncher-*-linux.tar.gz` |
 
 到 [Releases](https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-/releases) 页面下载对应版本。
 已内置 Java 21 运行时，**无需自行安装 Java**。
 
-### 安装
+### 使用方法
 
-- **Windows**：解压 zip 后运行 `SimpleMCLauncher.exe`；或直接运行 `.exe` 安装包
-- **macOS**：打开 `.dmg`，把启动器拖进 Applications。首次打开若提示「无法验证开发者」，右键点击 → 打开
-- **Linux**：`sudo dpkg -i simplemc-launcher_*_amd64.deb`
+1. 下载对应平台的压缩包
+2. **完整解压**到一个文件夹（不要直接在压缩包里运行）
+3. 双击运行
+
+- **Windows**：双击 `SimpleMCLauncher.exe`
+  - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
+- **macOS**：双击 `SimpleMCLauncher.app`
+  - 首次打开若提示「无法验证开发者」，右键点击 → 打开
+- **Linux**：
+  ```bash
+  tar -xzf SimpleMCLauncher-*-linux.tar.gz
+  cd SimpleMCLauncher && ./bin/SimpleMCLauncher
+  ```
+
+### 目录结构
+
+```
+SimpleMCLauncher/
+├── SimpleMCLauncher.exe   主程序，双击运行
+├── app/                   程序代码（别删）
+├── runtime/               内置 Java 21（别删）
+└── pyLauncher/            数据目录
+    ├── launcher_config.json   配置
+    ├── launcher.log           日志
+    ├── .minecraft/            游戏目录（版本、模组、存档）
+    ├── servers/               服务端
+    └── java/                  下载的 Java
+```
+
+整个文件夹可以随意移动、复制到 U 盘，不影响使用。
 
 ## 功能
 
@@ -91,19 +120,23 @@ Windows 下双击 `启动.cmd`；或手动：
 .\launch.ps1
 ```
 
-## 构建安装包
+## 构建便携版
 
-需要 JDK 21 与 `jpackage`。
+需要 JDK 21（含 `jpackage`）。不需要 WiX / fakeroot。
 
 ```bash
 ./build.sh
 ```
 
-产物在 `target/dist/`。
+产物在 `target/dist/`：
 
-- Windows 需要 [WiX Toolset](https://wixtoolset.org/) 才能生成 `.exe` 安装包；没有 WiX 时生成便携版 zip
-- macOS 生成 `.dmg`
-- Linux 需要 `fakeroot`，生成 `.deb`
+| 平台 | 产物 |
+|------|------|
+| Windows | `SimpleMCLauncher-<ver>-windows.zip` |
+| macOS | `SimpleMCLauncher-<ver>-macos.zip` |
+| Linux | `SimpleMCLauncher-<ver>-linux.tar.gz` |
+
+版本号自动从 `pom.xml` 读取，不用手动改多处。
 
 推送到 `v*` tag 会触发 GitHub Actions 在三个平台各自构建并发布到 Release。
 
