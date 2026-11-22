@@ -10,12 +10,19 @@
 set -euo pipefail
 
 APP_NAME="SimpleMCLauncher"
-APP_VERSION="5.1.0"
 MAIN_CLASS="com.simplemc.launcher.LauncherApp"
 MAIN_JAR="SimpleMCLauncher.jar"
 DIST_DIR="target/dist"
 
 cd "$(dirname "$0")"
+
+# 版本号从 pom.xml 读取，避免和 Constants.java 不同步
+APP_VERSION="$(sed -n 's|.*<version>\([0-9][^<]*\)</version>.*|\1|p' pom.xml | head -1)"
+if [ -z "$APP_VERSION" ]; then
+    echo "ERROR: 无法从 pom.xml 读取版本号"
+    exit 1
+fi
+echo "==> Version: $APP_VERSION"
 
 echo "==> Maven package"
 ./mvnw -q -B -DskipTests package
