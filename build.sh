@@ -154,6 +154,8 @@ case "$OS" in
         build_app_image src/main/resources/icon.icns
 
         PKG="$DIST_DIR/$APP_NAME"
+        echo "==> macOS 产物实际内容："
+        ls -la "$PKG" || true
         prepare_data_dir "$PKG"
 
         echo "==> 压缩为 zip"
@@ -213,13 +215,26 @@ case "$OS" in
     Darwin)
         check_dir "$PKG"
         check_dir "$PKG/pyLauncher"
-        APP_BUNDLE="$(find "$PKG" -maxdepth 1 -name "*.app" | head -1)"
+
+        # macOS 的 jpackage app-image 可能有两种布局：
+        #  1) <pkg>/SimpleMCLauncher.app（标准 .app 包）
+        #  2) <pkg>/bin/ + <pkg>/lib/app/ + <pkg>/lib/runtime/（无签名时）
+        APP_BUNDLE="$(find "$PKG" -maxdepth 1 -name "*.app" 2>/dev/null | head -1)"
         if [ -n "$APP_BUNDLE" ]; then
             echo "  OK   ${APP_BUNDLE#$DIST_DIR/}"
             check_dir "$APP_BUNDLE/Contents/app"
             check_dir "$APP_BUNDLE/Contents/runtime"
+            MAC_EXE="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
         else
-            echo "  MISS *.app"
+            echo "  INFO 没有 .app 包，检查 bin/lib 布局"
+            check_dir "$PKG/lib/app"
+            check_dir "$PKG/lib/runtime"
+            MAC_EXE="$PKG/bin/$APP_NAME"
+        fi
+        if [ -f "$MAC_EXE" ]; then
+            echo "  OK   ${MAC_EXE#$DIST_DIR/}"
+        else
+            echo "  MISS 可执行文件"
             STRUCT_OK=0
         fi
         ;;
