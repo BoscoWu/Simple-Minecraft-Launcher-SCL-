@@ -7,41 +7,37 @@
 
 ## 下载
 
-**便携版，解压即用，无需安装。**
+**单文件版：只有一个程序文件，不需要安装，也不需要另外装 Java。**
 
 | 平台 | 文件 |
 |------|------|
-| Windows | `SimpleMCLauncher-*-windows.zip` |
-| macOS | `SimpleMCLauncher-*-macos.zip` |
-| Linux | `SimpleMCLauncher-*-linux.tar.gz` |
+| Windows | `SimpleMCLauncher-*-windows.zip`（内含 `SimpleMCLauncher.exe`） |
+| macOS | `SimpleMCLauncher-*-macos.zip`（内含 `SimpleMCLauncher`） |
+| Linux | `SimpleMCLauncher-*-linux.zip`（内含 `SimpleMCLauncher`） |
 
 到 [Releases](https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-/releases) 页面下载对应版本。
-已内置 Java 21 运行时，**无需自行安装 Java**。
 
 ### 使用方法
 
-1. 下载对应平台的压缩包
-2. **完整解压**到一个文件夹（不要直接在压缩包里运行）
-3. 双击运行
+1. 下载并解压对应平台的压缩包
+2. 双击运行 `SimpleMCLauncher`
+3. 首次启动会花几秒解压运行时，之后就快了
 
 - **Windows**：双击 `SimpleMCLauncher.exe`
   - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
-- **macOS**：双击 `SimpleMCLauncher.app`
-  - 首次打开若提示「无法验证开发者」，右键点击 → 打开
-- **Linux**：
-  ```bash
-  tar -xzf SimpleMCLauncher-*-linux.tar.gz
-  cd SimpleMCLauncher && ./bin/SimpleMCLauncher
-  ```
+- **macOS**：双击 `SimpleMCLauncher`
+  - 首次打开若被拦，右键 → 打开
+  - 或执行 `xattr -d com.apple.quarantine ./SimpleMCLauncher`
+- **Linux**：`chmod +x SimpleMCLauncher && ./SimpleMCLauncher`
 
 ### 目录结构
 
+程序只有一个文件，数据放在它旁边：
+
 ```
-SimpleMCLauncher/
-├── SimpleMCLauncher.exe   主程序，双击运行
-├── app/                   程序代码（别删）
-├── runtime/               内置 Java 21（别删）
-└── pyLauncher/            数据目录
+你选定的文件夹/
+├── SimpleMCLauncher.exe    唯一需要的文件
+└── pyLauncher/             首次运行后自动生成
     ├── launcher_config.json   配置
     ├── launcher.log           日志
     ├── .minecraft/            游戏目录（版本、模组、存档）
@@ -49,7 +45,9 @@ SimpleMCLauncher/
     └── java/                  下载的 Java
 ```
 
-整个文件夹可以随意移动、复制到 U 盘，不影响使用。
+运行时会被解压到系统缓存目录（Windows 为
+`%LOCALAPPDATA%\SimpleMCLauncher`），不占用程序目录。
+把程序文件和 `pyLauncher` 一起搬走就能继续用，也可以放 U 盘里。
 
 ## 功能
 
@@ -120,21 +118,35 @@ Windows 下双击 `启动.cmd`；或手动：
 .\launch.ps1
 ```
 
-## 构建便携版
+## 构建单文件版
 
-需要 JDK 21（含 `jpackage`）。不需要 WiX / fakeroot。
+需要 JDK 21（含 `jlink`）。
+
+**Windows**（还需要 .NET Framework 4，Win10/11 自带）：
+
+```powershell
+./packaging/build-single-exe.ps1
+```
+
+**macOS / Linux**：
 
 ```bash
-./build.sh
+./build-singlefile.sh
 ```
 
 产物在 `target/dist/`：
 
-| 平台 | 产物 |
-|------|------|
-| Windows | `SimpleMCLauncher-<ver>-windows.zip` |
-| macOS | `SimpleMCLauncher-<ver>-macos.zip` |
-| Linux | `SimpleMCLauncher-<ver>-linux.tar.gz` |
+| 平台 | 中间产物 | 发布包 |
+|------|----------|--------|
+| Windows | `SimpleMCLauncher.exe` | `SimpleMCLauncher-<ver>-windows.zip` |
+| macOS | `SimpleMCLauncher` | `SimpleMCLauncher-<ver>-macos.zip` |
+| Linux | `SimpleMCLauncher` | `SimpleMCLauncher-<ver>-linux.zip` |
+
+原理：
+
+- Windows 用 C# 写的 stub（`packaging/Stub.cs`），把 jar + jlink JRE
+  作为内嵌资源，首次运行解压到 `%LOCALAPPDATA%`
+- macOS / Linux 用「shell 脚本头 + tar.gz 负载」拼接成单个可执行文件
 
 版本号自动从 `pom.xml` 读取，不用手动改多处。
 

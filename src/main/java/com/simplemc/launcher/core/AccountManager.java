@@ -86,13 +86,11 @@ public final class AccountManager {
      * 第一步：申请设备码。用户需要在浏览器打开 verificationUri 并输入 userCode。
      */
     public static DeviceCode requestDeviceCode() throws Exception {
-        String body = Http.MAPPER.writeValueAsString(java.util.Map.of(
-                "client_id", Constants.MS_CLIENT_ID,
-                "scope", "XboxLive.signin offline_access"
-        ));
         HttpResponse<String> resp = postForm(
                 "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
-                body);
+                java.util.Map.of(
+                        "client_id", Constants.MS_CLIENT_ID,
+                        "scope", "XboxLive.signin offline_access"));
         if (resp.statusCode() != 200) {
             throw new IllegalStateException("申请设备码失败: " + resp.body());
         }
@@ -121,13 +119,12 @@ public final class AccountManager {
                 throw new IllegalStateException("已取消登录");
             }
             Thread.sleep(dc.interval() * 1000L);
-            String body = Http.MAPPER.writeValueAsString(java.util.Map.of(
-                    "client_id", Constants.MS_CLIENT_ID,
-                    "grant_type", "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code", dc.deviceCode()
-            ));
             HttpResponse<String> resp = postForm(
-                    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token", body);
+                    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                    java.util.Map.of(
+                            "client_id", Constants.MS_CLIENT_ID,
+                            "grant_type", "urn:ietf:params:oauth:grant-type:device_code",
+                            "device_code", dc.deviceCode()));
             JsonNode j = Http.MAPPER.readTree(resp.body());
             String error = j.path("error").asText("");
             if ("authorization_pending".equals(error)) {
@@ -225,14 +222,29 @@ public final class AccountManager {
 
     // ---------------- HTTP 辅助 ----------------
 
-    private static HttpResponse<String> postForm(String url, String jsonBody)
+    /**
+     * 向微软 OAuth 端点提交表单。
+     *
+     * <p>微软的 devicecode / token 端点<b>只认 application/x-www-form-urlencoded</b>，
+     * 用 application/json 会被拒并返回
+     * {@code AADSTS900144: The request body must contain the following parameter: 'client_id'}。</p>
+     */
+    private static HttpResponse<String> postForm(String url, java.util.Map<String, String> form)
             throws Exception {
+        StringBuilder sb = new StringBuilder();
+        for (var e : form.entrySet()) {
+            if (sb.length() > 0) sb.append('&');
+            sb.append(java.net.URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8))
+              .append('=')
+              .append(java.net.URLEncoder.encode(
+                      e.getValue() == null ? "" : e.getValue(), StandardCharsets.UTF_8));
+        }
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", "application/json")
+                .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("Accept", "application/json")
                 .header("User-Agent", Constants.USER_AGENT)
-                .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
+                .POST(HttpRequest.BodyPublishers.ofString(sb.toString(), StandardCharsets.UTF_8))
                 .build();
         return HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.ALWAYS)
@@ -240,8 +252,19 @@ public final class AccountManager {
                 .send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    /** 向 Xbox / Minecraft 端点提交 JSON（这些端点才需要 JSON） */
     private static JsonNode postJson(String url, String body) throws Exception {
-        HttpResponse<String> r = postForm(url, body);
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("User-Agent", Constants.USER_AGENT)
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> r = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.ALWAYS)
+                .build()
+                .send(req, HttpResponse.BodyHandlers.ofString());
         if (r.body() == null || r.body().isBlank()) {
             throw new IllegalStateException("空响应: HTTP " + r.statusCode());
         }
