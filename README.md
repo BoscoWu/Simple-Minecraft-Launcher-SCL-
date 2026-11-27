@@ -7,38 +7,53 @@
 
 ## 下载
 
-每个平台**一个安装文件**，装好后从菜单/启动台运行，不用管内部目录。
 **已内置 Java 21 运行时，无需另外安装 Java。**
 
-| 平台 | 文件 | 安装方式 |
-|------|------|----------|
-| Windows | `SimpleMCLauncher-*-windows.exe` | 双击安装 |
+| 平台 | 文件 | 说明 |
+|------|------|------|
+| Windows | `SimpleMCLauncher-*-windows.exe` | **单文件，双击即用** |
 | macOS | `SimpleMCLauncher-*-macos.dmg` | 打开后拖进 Applications |
 | Linux | `SimpleMCLauncher-*-linux.deb` | `sudo dpkg -i` |
 
 到 [Releases](https://github.com/BoscoWu/Simple-Minecraft-Launcher-SCL-/releases) 页面下载对应版本。
 
-### 安装
+### Windows（推荐）
 
-- **Windows**：双击 `.exe`，按向导安装
-  - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
-- **macOS**：打开 `.dmg`，把启动器拖进 Applications
-  - 首次打开若提示「无法验证开发者」，右键点击 → 打开
-- **Linux**：
-  ```bash
-  sudo dpkg -i SimpleMCLauncher-*-linux.deb
-  # 若提示依赖缺失：
-  sudo apt-get install -f
-  ```
-  装好后可在应用菜单找到，或命令行运行 `SimpleMCLauncher`
+下载 `SimpleMCLauncher-*-windows.exe`，放到任意文件夹，**双击运行**。
+
+```
+你的文件夹/
+├── SimpleMCLauncher.exe     唯一需要的文件
+└── pyLauncher/              首次运行后自动生成
+```
+
+- 不需要安装，没有 app / runtime 文件夹
+- 数据（配置、游戏、日志）都在 `pyLauncher` 里
+- 整个文件夹可以拷到 U 盘，程序和数据一起带走
+- 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
+- 首次启动需要几秒解压运行时，之后就快了
+
+### macOS
+
+打开 `.dmg`，把启动器拖进 Applications。
+
+首次打开若提示「无法验证开发者」，右键点击 → 打开。
+
+### Linux
+
+```bash
+sudo dpkg -i SimpleMCLauncher-*-linux.deb
+# 若提示依赖缺失：
+sudo apt-get install -f
+```
+
+装好后可在应用菜单找到，或命令行运行 `SimpleMCLauncher`。
 
 ### 数据目录
 
-配置和游戏数据都在用户目录下：
-
 | 平台 | 位置 |
 |------|------|
-| Windows | `%APPDATA%\SimpleMCLauncher\pyLauncher` |
+| Windows | 程序旁边的 `pyLauncher/` |
 | macOS | `~/Library/Application Support/SimpleMCLauncher/pyLauncher` |
 | Linux | `~/.local/share/SimpleMCLauncher/pyLauncher` |
 
@@ -51,8 +66,8 @@ pyLauncher/
 └── java/                  下载的 Java
 ```
 
-> **便携用法**：把程序放在可写目录下运行时，数据会存到程序旁边的
-> `pyLauncher/`，可以连同程序一起拷到 U 盘。
+macOS / Linux 装在系统目录，所以数据放用户目录；
+把程序放到可写目录运行时，也会自动改用便携模式（数据在程序旁边）。
 
 ## 功能
 
@@ -123,30 +138,37 @@ Windows 下双击 `启动.cmd`；或手动：
 .\launch.ps1
 ```
 
-## 构建安装包
+## 构建
 
-需要 JDK 21（含 `jpackage`）。
+需要 JDK 21（含 `jlink` / `jpackage`）。
+
+**Windows** —— 单文件 exe（需要 .NET Framework 4，Win10/11 自带）：
+
+```powershell
+.\packaging\build-exe.ps1
+```
+
+产物：`target/dist/SimpleMCLauncher.exe`
+
+原理：C# 写的小启动器（`packaging/LauncherStub.cs`）把 jar + jlink 精简 JRE
+作为内嵌资源编译进单个 exe，首次运行解压到
+`%LOCALAPPDATA%\SimpleMCLauncher\runtime-<hash>`，之后直接复用。
+`pyLauncher` 通过 `-Dscl.data.dir` 固定落在 exe 旁边。
+
+**macOS / Linux** —— dmg / deb：
 
 ```bash
 ./build-native.sh
 ```
 
-依赖：
+- **Linux** 需要 `fakeroot`
+- **macOS** 无需额外依赖
 
-- **Windows** 需要 [WiX Toolset](https://wixtoolset.org/) 3.x（生成 `.exe`）
-- **Linux** 需要 `fakeroot`（生成 `.deb`）
-- **macOS** 无需额外依赖（生成 `.dmg`）
+产物：`target/dist/SimpleMCLauncher-<ver>-macos.dmg`、`SimpleMCLauncher-<ver>-linux.deb`
 
-产物在 `target/dist/`：
-
-| 平台 | 产物 |
-|------|------|
-| Windows | `SimpleMCLauncher-<ver>-windows.exe` |
-| macOS | `SimpleMCLauncher-<ver>-macos.dmg` |
-| Linux | `SimpleMCLauncher-<ver>-linux.deb` |
-
-内置的运行时模块包含 `java.net.http`（网络）和 `jdk.crypto.ec`（TLS），
-少任一个都会导致启动器无法联网。
+JavaFX 必须通过 `--module-path` 加载（只放 classpath 会报
+「缺少 JavaFX 运行时组件」）。内置运行时包含 `java.net.http`（网络）
+和 `jdk.crypto.ec`（TLS），少任一个都会导致启动器无法联网。
 
 版本号自动从 `pom.xml` 读取，不用手动改多处。
 

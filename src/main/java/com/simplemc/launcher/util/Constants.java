@@ -12,7 +12,7 @@ public final class Constants {
 
     public static final String APP_NAME = "极简 MC 启动器";
     public static final String APP_TITLE = "极简 MC 启动器";
-    public static final String VERSION = "v5.2.3";
+    public static final String VERSION = "v5.2.4";
 
     public static final String REPO_OWNER = "BoscoWu";
     public static final String REPO_NAME = "Simple-Minecraft-Launcher-SCL-";

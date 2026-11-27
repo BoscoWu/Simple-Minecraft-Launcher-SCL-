@@ -35,26 +35,19 @@ jobs:
           java-version: '21'
           cache: maven
 
-      # ---------- Windows：.exe 安装包 ----------
-      - name: Install WiX (Windows)
+      # ---------- Windows：单文件 exe（不用安装程序）----------
+      - name: Build single exe (Windows)
         if: matrix.os == 'windows-latest'
-        run: |
-          choco install wixtoolset --no-progress -y
-          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" >> $env:GITHUB_PATH
+        shell: pwsh
+        run: ./packaging/build-exe.ps1
 
-      - name: Build exe installer (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: ./build-native.sh
-
-      # ---------- Linux 需要 fakeroot 生成 deb ----------
+      # ---------- macOS / Linux：dmg / deb ----------
       - name: Install fakeroot (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y fakeroot
 
-      # ---------- macOS：.dmg / Linux：.deb ----------
       - name: Build native package (macOS/Linux)
         if: matrix.os != 'windows-latest'
         shell: bash
@@ -71,9 +64,9 @@ jobs:
         with:
           name: dist-${{ matrix.artifact }}
           path: |
+            target/dist/SimpleMCLauncher.exe
             target/dist/*.dmg
             target/dist/*.deb
-            target/dist/*.exe
           if-no-files-found: error
 
   release:
@@ -88,8 +81,14 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Show files
-        run: ls -laR dist
+      - name: Rename exe to versioned name
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if [ -f "dist/SimpleMCLauncher.exe" ]; then
+            mv "dist/SimpleMCLauncher.exe" "dist/SimpleMCLauncher-$VER-windows.exe"
+          fi
+          ls -laR dist
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -106,56 +105,70 @@ jobs:
 
             ### 下载
 
-            | 平台 | 文件 | 安装方式 |
-            |------|------|----------|
-            | Windows | `SimpleMCLauncher-*-windows.exe` | 双击安装 |
+            | 平台 | 文件 | 说明 |
+            |------|------|------|
+            | Windows | `SimpleMCLauncher-*-windows.exe` | **单文件，双击即用** |
             | macOS | `SimpleMCLauncher-*-macos.dmg` | 打开后拖进 Applications |
             | Linux | `SimpleMCLauncher-*-linux.deb` | `sudo dpkg -i` |
 
-            每个平台**只有一个安装文件**，装好后从菜单/启动台运行，不用管内部目录。
             **已内置 Java 21 运行时，无需另外安装 Java。**
 
-            ### 安装
+            ### Windows（推荐）
 
-            - **Windows**：双击 `.exe`，按向导安装
-              - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
-            - **macOS**：打开 `.dmg`，把启动器拖进 Applications
-              - 首次打开若提示「无法验证开发者」，右键点击 → 打开
-            - **Linux**：
-              ```bash
-              sudo dpkg -i SimpleMCLauncher-*-linux.deb
-              # 若提示依赖缺失：
-              sudo apt-get install -f
-              ```
-              装好后可在应用菜单里找到，或命令行运行 `SimpleMCLauncher`
+            下载 `SimpleMCLauncher-*-windows.exe`，放到任意文件夹，**双击运行**。
 
-            ### 数据目录
+            ```
+            你的文件夹/
+            ├── SimpleMCLauncher.exe     唯一需要的文件
+            └── pyLauncher/              首次运行后自动生成
+            ```
 
-            配置和游戏数据都在用户目录下：
+            - 不需要安装，没有 app / runtime 文件夹
+            - 数据（配置、游戏、日志）都在 `pyLauncher` 里
+            - 整个文件夹可以拷到 U 盘，程序和数据一起带走
+            - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
+            - 首次启动需要几秒解压运行时，之后就快了
 
-            | 平台 | 位置 |
-            |------|------|
-            | Windows | `%APPDATA%\SimpleMCLauncher\pyLauncher` |
-            | macOS | `~/Library/Application Support/SimpleMCLauncher/pyLauncher` |
-            | Linux | `~/.local/share/SimpleMCLauncher/pyLauncher` |
+            ### macOS
 
-            里面对应 `.minecraft/`（版本、模组、存档）、`servers/`、`java/`、
-            `launcher_config.json`、`launcher.log`。
+            打开 `.dmg`，把 `SimpleMCLauncher` 拖进 Applications。
+            首次打开若提示「无法验证开发者」，右键点击 → 打开。
 
-            > 便携用法：把程序放在可写目录下运行时，数据会存到程序旁边的
-            > `pyLauncher/`，可以连同程序一起拷到 U 盘。
+            数据目录：`~/Library/Application Support/SimpleMCLauncher/pyLauncher`
 
-            ### 系统要求
+            ### Linux
 
-            - Windows 10 / 11（64 位）
-            - macOS 11+
-            - Linux x86_64（需要 GTK3）
+            ```bash
+            sudo dpkg -i SimpleMCLauncher-*-linux.deb
+            # 若提示依赖缺失：
+            sudo apt-get install -f
+            ```
+
+            装好后可在应用菜单找到，或命令行运行 `SimpleMCLauncher`。
+
+            数据目录：`~/.local/share/SimpleMCLauncher/pyLauncher`
+
+            ### pyLauncher 里有什么
+
+            | 文件/目录 | 内容 |
+            |-----------|------|
+            | `launcher_config.json` | 配置 |
+            | `launcher.log` | 日志 |
+            | `.minecraft/` | 游戏目录（版本、模组、存档） |
+            | `servers/` | 服务端 |
+            | `java/` | 下载的 Java |
+
+            ### 本版更新
+
+            - **Windows 改为单文件**：不再是安装程序，也不再解压出
+              app / runtime 文件夹，双击 exe 直接用
+            - 修复正版登录（微软 OAuth 需要 form-encoded 提交）
 
             ### 许可证
 
             LGPL-2.1
           files: |
+            dist/*.exe
             dist/*.dmg
             dist/*.deb
-            dist/*.exe
           fail_on_unmatched_files: false

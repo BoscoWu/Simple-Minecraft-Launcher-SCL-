@@ -79,30 +79,8 @@ COMMON_ARGS=(
 
 case "$OS" in
     MINGW*|MSYS*|CYGWIN*)
-        echo "==> jpackage exe installer"
-        # 打包 Windows 依赖 jar
-        for jar in target/dependency/*.jar; do
-            [ -f "$jar" ] || continue
-            case "$(basename "$jar")" in
-                *-win.jar) cp "$jar" "$INPUT/" ;;
-            esac
-        done
-        echo "    jar: $(ls -1 "$INPUT" | wc -l) 个"
-
-        jpackage --type exe "${COMMON_ARGS[@]}" \
-            --icon src/main/resources/icon.ico \
-            --win-shortcut \
-            --win-menu \
-            --win-dir-chooser \
-            --win-per-user-install \
-            --win-menu-group "SimpleMC Launcher"
-
-        EXE=$(ls "$OUT"/*.exe 2>/dev/null | head -1)
-        [ -n "$EXE" ] || { echo "ERROR: 未生成 exe"; exit 1; }
-        TARGET="$OUT/$APP_NAME-$APP_VERSION-windows.exe"
-        [ "$EXE" = "$TARGET" ] || mv "$EXE" "$TARGET"
-        echo ""
-        echo "==> 产物：$TARGET"
+        echo "ERROR: Windows 请用 packaging/build-exe.ps1 打单文件 exe"
+        exit 1
         ;;
 
     Darwin)
@@ -147,12 +125,8 @@ echo ""
 echo "==> 检查产物"
 case "$OS" in
     MINGW*|MSYS*|CYGWIN*)
-        if [ -f "$TARGET" ]; then
-            SIZE=$(( $(wc -c < "$TARGET") / 1024 / 1024 ))
-            echo "  OK   Windows 安装包 ${SIZE} MB"
-        else
-            echo "  MISS 安装包"
-        fi
+        echo "ERROR: Windows 请用 packaging/build-exe.ps1"
+        exit 1
         ;;
     Darwin)
         # 验证 dmg 里确实有 .app
