@@ -96,13 +96,26 @@ Set-Content -Path $stubEdited -Value $stubTmp -Encoding UTF8
 $exe = Join-Path $outDir "SimpleMCLauncher.exe"
 $icon = Join-Path $proj "src\main\resources\icon.ico"
 
-& $csc.FullName /nologo /target:winexe /platform:anycpu `
-    /out:$exe `
-    /r:System.Windows.Forms.dll /r:System.IO.Compression.dll `
-    /r:System.IO.Compression.FileSystem.dll `
-    /resource:$payloadZip,payload.zip `
-    $(if (Test-Path $icon) { "/win32icon:$icon" }) `
-    $stubEdited 2>&1 | Select-Object -Last 5
+# 注意：不能用 /resource:$payloadZip,payload.zip 这种写法——
+# PowerShell 会把整个 token 当字面量，$payloadZip 不会被展开，
+# 导致 csc 报 "Error reading resource file ...\$payloadZip"。
+$cscArgs = @(
+    "/nologo"
+    "/target:winexe"
+    "/platform:anycpu"
+    "/out:$exe"
+    "/r:System.Windows.Forms.dll"
+    "/r:System.IO.Compression.dll"
+    "/r:System.IO.Compression.FileSystem.dll"
+    ("/resource:" + $payloadZip + ",payload.zip")
+)
+if (Test-Path $icon) {
+    $cscArgs += ("/win32icon:" + $icon)
+}
+$cscArgs += $stubEdited
+
+Write-Host "    csc $($cscArgs -join ' ')"
+& $csc.FullName @cscArgs 2>&1 | Select-Object -Last 5
 
 if ($LASTEXITCODE -ne 0) { throw "csc 编译失败" }
 if (-not (Test-Path $exe)) { throw "未生成 $exe" }
