@@ -35,35 +35,45 @@ jobs:
           java-version: '21'
           cache: maven
 
-      # ---------- Windows：单文件 exe ----------
-      - name: Build single exe (Windows)
+      # ---------- Windows：.exe 安装包 ----------
+      - name: Install WiX (Windows)
         if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: ./packaging/build-single-exe.ps1
-
-      - name: Package windows zip
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
         run: |
-          $ver = ([xml](Get-Content pom.xml -Raw)).project.version
-          $src = "target/dist/SimpleMCLauncher.exe"
-          $zip = "target/dist/SimpleMCLauncher-$ver-windows.zip"
-          Compress-Archive -Path $src -DestinationPath $zip -Force
-          Get-ChildItem target/dist
+          choco install wixtoolset --no-progress -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" >> $env:GITHUB_PATH
 
-      # ---------- macOS / Linux：单文件自解压脚本 ----------
-      - name: Build single file (macOS/Linux)
+      - name: Build exe installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: ./build-native.sh
+
+      # ---------- Linux 需要 fakeroot 生成 deb ----------
+      - name: Install fakeroot (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot
+
+      # ---------- macOS：.dmg / Linux：.deb ----------
+      - name: Build native package (macOS/Linux)
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          chmod +x mvnw build-singlefile.sh
-          ./build-singlefile.sh
+          chmod +x mvnw build-native.sh
+          ./build-native.sh
+
+      - name: List output
+        shell: bash
+        run: ls -laR target/dist || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.artifact }}
-          path: target/dist/*.zip
+          path: |
+            target/dist/*.dmg
+            target/dist/*.deb
+            target/dist/*.exe
           if-no-files-found: error
 
   release:
@@ -92,57 +102,48 @@ jobs:
           body: |
             ## Simple MC Launcher ${{ github.ref_name }}
 
-            极简 MC 启动器 · JavaFX 版 · **单文件版**
+            极简 MC 启动器 · JavaFX 版
 
             ### 下载
 
-            | 平台 | 文件 |
-            |------|------|
-            | Windows | `SimpleMCLauncher-*-windows.zip` |
-            | macOS | `SimpleMCLauncher-*-macos.zip` |
-            | Linux | `SimpleMCLauncher-*-linux.zip` |
+            | 平台 | 文件 | 安装方式 |
+            |------|------|----------|
+            | Windows | `SimpleMCLauncher-*-windows.exe` | 双击安装 |
+            | macOS | `SimpleMCLauncher-*-macos.dmg` | 打开后拖进 Applications |
+            | Linux | `SimpleMCLauncher-*-linux.deb` | `sudo dpkg -i` |
 
-            ### 使用方法
+            每个平台**只有一个安装文件**，装好后从菜单/启动台运行，不用管内部目录。
+            **已内置 Java 21 运行时，无需另外安装 Java。**
 
-            **只有一个程序文件，不需要安装，不需要另外装 Java。**
+            ### 安装
 
-            1. 下载并解压对应平台的压缩包
-            2. 双击（或命令行运行）`SimpleMCLauncher`
-            3. 首次启动会花几秒解压运行时，之后就快了
-
-            ```
-            你选定的文件夹/
-            ├── SimpleMCLauncher.exe     <- 唯一需要的文件
-            └── pyLauncher/              <- 首次运行后自动生成
-            ```
-
-            - **Windows**：双击 `SimpleMCLauncher.exe`
+            - **Windows**：双击 `.exe`，按向导安装
               - 若提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」
-            - **macOS**：双击 `SimpleMCLauncher`
-              - 首次打开若被拦，右键 → 打开；或
-                `xattr -d com.apple.quarantine ./SimpleMCLauncher`
-            - **Linux**：`chmod +x SimpleMCLauncher && ./SimpleMCLauncher`
+            - **macOS**：打开 `.dmg`，把启动器拖进 Applications
+              - 首次打开若提示「无法验证开发者」，右键点击 → 打开
+            - **Linux**：
+              ```bash
+              sudo dpkg -i SimpleMCLauncher-*-linux.deb
+              # 若提示依赖缺失：
+              sudo apt-get install -f
+              ```
+              装好后可在应用菜单里找到，或命令行运行 `SimpleMCLauncher`
 
             ### 数据目录
 
-            `pyLauncher` 放在程序旁边，是整个启动器的全部数据：
+            配置和游戏数据都在用户目录下：
 
-            | 文件/目录 | 内容 |
-            |-----------|------|
-            | `launcher_config.json` | 配置 |
-            | `launcher.log` | 日志 |
-            | `.minecraft/` | 游戏目录（版本、模组、存档） |
-            | `servers/` | 服务端 |
-            | `java/` | 下载的 Java |
+            | 平台 | 位置 |
+            |------|------|
+            | Windows | `%APPDATA%\SimpleMCLauncher\pyLauncher` |
+            | macOS | `~/Library/Application Support/SimpleMCLauncher/pyLauncher` |
+            | Linux | `~/.local/share/SimpleMCLauncher/pyLauncher` |
 
-            把程序文件和 `pyLauncher` 一起搬走就能继续用，也可以放 U 盘里。
+            里面对应 `.minecraft/`（版本、模组、存档）、`servers/`、`java/`、
+            `launcher_config.json`、`launcher.log`。
 
-            ### 本版更新
-
-            - **修复正版登录**：微软 OAuth 接口要求 form-encoded 提交，
-              之前用了 JSON 导致 `AADSTS900144`，无法登录
-            - **改为单文件分发**：不再有 app / runtime 文件夹，
-              下载后只有一个程序文件
+            > 便携用法：把程序放在可写目录下运行时，数据会存到程序旁边的
+            > `pyLauncher/`，可以连同程序一起拷到 U 盘。
 
             ### 系统要求
 
@@ -153,5 +154,8 @@ jobs:
             ### 许可证
 
             LGPL-2.1
-          files: dist/*.zip
+          files: |
+            dist/*.dmg
+            dist/*.deb
+            dist/*.exe
           fail_on_unmatched_files: false

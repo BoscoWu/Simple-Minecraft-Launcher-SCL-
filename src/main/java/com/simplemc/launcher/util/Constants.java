@@ -12,7 +12,7 @@ public final class Constants {
 
     public static final String APP_NAME = "极简 MC 启动器";
     public static final String APP_TITLE = "极简 MC 启动器";
-    public static final String VERSION = "v5.2.2";
+    public static final String VERSION = "v5.2.3";
 
     public static final String REPO_OWNER = "BoscoWu";
     public static final String REPO_NAME = "Simple-Minecraft-Launcher-SCL-";
@@ -42,14 +42,71 @@ public final class Constants {
     public static final String MS_CLIENT_ID = "8d7c60d0-fddf-464c-a9f4-d190f1daa576";
     public static final String MS_SCOPE = "XboxLive.signin offline_access";
 
-    /** 数据目录：程序所在目录下的 pyLauncher（与 Python 版保持一致，方便共用数据） */
+    /**
+     * 数据目录：优先用程序目录下的 pyLauncher（便携），
+     * 程序目录不可写时（如装到 /opt、/Applications）退回用户目录。
+     */
     public static final Path APP_DIR = resolveAppDir();
-    public static final Path DATA_DIR = APP_DIR.resolve("pyLauncher");
+    public static final Path DATA_DIR = resolveDataDir();
     public static final Path MC_DIR = DATA_DIR.resolve(".minecraft");
     public static final Path SERVER_DIR = DATA_DIR.resolve("servers");
     public static final Path JAVA_DIR = DATA_DIR.resolve("java");
     public static final Path CONFIG_FILE = DATA_DIR.resolve("launcher_config.json");
     public static final Path LOG_FILE = DATA_DIR.resolve("launcher.log");
+
+    /**
+     * 决定数据目录位置。
+     *
+     * <ul>
+     *   <li>程序目录可写 → {@code <程序目录>/pyLauncher}（便携，可放U盘）</li>
+     *   <li>程序目录不可写 → 用户数据目录（deb / dmg 安装的情形）</li>
+     * </ul>
+     */
+    private static Path resolveDataDir() {
+        String override = System.getProperty("scl.data.dir");
+        if (override != null && !override.isBlank()) {
+            return Paths.get(override).toAbsolutePath();
+        }
+
+        Path portable = APP_DIR.resolve("pyLauncher");
+        if (isWritableDir(APP_DIR)) {
+            return portable;
+        }
+
+        // 程序装在系统目录，退到用户数据目录
+        Path home = Paths.get(System.getProperty("user.home", "."));
+        String os = System.getProperty("os.name", "").toLowerCase();
+        Path base;
+        if (os.contains("mac")) {
+            base = home.resolve("Library/Application Support");
+        } else if (os.contains("win")) {
+            String appData = System.getenv("APPDATA");
+            base = (appData != null && !appData.isBlank())
+                    ? Paths.get(appData)
+                    : home.resolve("AppData/Roaming");
+        } else {
+            String xdg = System.getenv("XDG_DATA_HOME");
+            base = (xdg != null && !xdg.isBlank())
+                    ? Paths.get(xdg)
+                    : home.resolve(".local/share");
+        }
+        return base.resolve("SimpleMCLauncher").resolve("pyLauncher");
+    }
+
+    /** 目录是否可写（不存在则看父目录） */
+    private static boolean isWritableDir(Path dir) {
+        try {
+            if (!java.nio.file.Files.exists(dir)) {
+                java.nio.file.Files.createDirectories(dir);
+            }
+            Path probe = dir.resolve(".writetest-" + System.nanoTime());
+            java.nio.file.Files.writeString(probe, "x");
+            java.nio.file.Files.deleteIfExists(probe);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     /**
      * 解析应用根目录（便携版的顶层目录，pyLauncher 就放这里）。
