@@ -58,12 +58,20 @@ Write-Host "==> jlink 生成精简 JRE"
 $jlink = Join-Path $env:JAVA_HOME "bin\jlink.exe"
 if (-not (Test-Path $jlink)) { throw "找不到 jlink: $jlink" }
 
-# 缺 java.net.http 会没有网络；缺 jdk.crypto.ec 会 TLS 握手失败
+# 这个 JRE 有两个用途，模块必须同时满足：
+#   1. 跑启动器本身：java.net.http（网络）、jdk.crypto.ec（TLS）
+#   2. 跑 Minecraft：java.compiler、java.sql 等
+#      （用 jdeps 分析 1.21.1 游戏 jar 得出的依赖）
+# 少任何一个，用户没装 Java 时游戏就起不来。
 $modules = @(
+    # 启动器
     "java.base", "java.desktop", "java.net.http", "java.logging",
     "java.management", "java.naming", "java.prefs", "java.xml",
     "jdk.crypto.ec", "jdk.crypto.cryptoki", "jdk.charsets",
-    "jdk.jfr", "jdk.unsupported"
+    "jdk.jfr", "jdk.unsupported",
+    # Minecraft 需要但上面没有的
+    "java.compiler", "java.sql", "java.instrument", "jdk.zipfs",
+    "jdk.management", "java.security.jgss"
 ) -join ","
 
 & $jlink --add-modules $modules --output $jreDir `

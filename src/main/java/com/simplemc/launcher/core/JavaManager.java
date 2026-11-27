@@ -68,8 +68,12 @@ public final class JavaManager {
                         "java.exe").toString());
             }
         }
-        // 启动器自带目录
+        // 启动器自带目录（自动下载的 Java）
         candidates.add(Constants.JAVA_DIR.resolve("bin").resolve(exe("java")).toString());
+
+        // 启动器自身的运行时（单文件 exe 解压出的 JRE / jpackage 的 runtime）。
+        // 用户没装 Java 时这是唯一可用来源，缺了游戏一定起不来。
+        candidates.addAll(bundledRuntimes());
 
         for (String c : candidates) {
             JavaInfo info = probe(c);
@@ -79,6 +83,56 @@ public final class JavaManager {
         }
         found.sort((a, b) -> Integer.compare(b.major(), a.major()));
         return found;
+    }
+
+    /**
+     * 找出启动器自带的 Java 可执行文件。
+     *
+     * <p>三种来源：</p>
+     * <ol>
+     *   <li>单文件 exe：stub 解压出的 {@code <cache>/jre/bin/java.exe}，
+     *       路径通过 {@code -Dscl.jre.dir} 传进来</li>
+     *   <li>jpackage 版：{@code jpackage.app-path} 指向 {@code <root>/app/}，
+     *       runtime 在 {@code <root>/runtime/bin/}</li>
+     *   <li>兜底：从当前 JVM 的 {@code java.home} 反推</li>
+     * </ol>
+     */
+    private static List<String> bundledRuntimes() {
+        List<String> out = new ArrayList<>();
+
+        // 1. 单文件 exe 传入的 JRE 目录
+        String jreDir = System.getProperty("scl.jre.dir");
+        if (jreDir != null && !jreDir.isBlank()) {
+            out.add(Path.of(jreDir, "bin", exe("java")).toString());
+        }
+
+        // 2. jpackage app-image：<root>/app/<exe> -> <root>/runtime/bin/java
+        String appPath = System.getProperty("jpackage.app-path");
+        if (appPath != null && !appPath.isBlank()) {
+            try {
+                Path exeDir = Path.of(appPath).toAbsolutePath().getParent();
+                if (exeDir != null) {
+                    Path root = "app".equalsIgnoreCase(
+                            String.valueOf(exeDir.getFileName()))
+                            ? exeDir.getParent() : exeDir;
+                    if (root != null) {
+                        out.add(root.resolve("runtime").resolve("bin")
+                                .resolve(exe("java")).toString());
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 3. 当前 JVM 自己的运行时
+        try {
+            String home = System.getProperty("java.home");
+            if (home != null && !home.isBlank()) {
+                Path p = Path.of(home, "bin", exe("java"));
+                if (Files.isRegularFile(p)) out.add(p.toString());
+            }
+        } catch (Exception ignored) {}
+
+        return out;
     }
 
     /** 探测单个 java 可执行文件 */

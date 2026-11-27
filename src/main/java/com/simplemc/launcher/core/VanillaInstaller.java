@@ -381,11 +381,11 @@ public final class VanillaInstaller {
             String sub = hash.substring(0, 2);
             Path dest = objectsDir.resolve(sub).resolve(hash);
             if (Files.isRegularFile(dest) && Files.size(dest) == size) continue;
-            // 官方 CDN 优先：BMCLAPI 对高频资源请求会大量返回 429，
-            // 反而比官方源慢得多；官方源失败后再回退 BMCLAPI。
-            String official = "https://resources.download.minecraft.net/" + sub + "/" + hash;
+            // 国内网络下 BMCLAPI 明显快于官方 CDN，所以镜像优先。
+            // 镜像失败（429 / 502 / 超时）时 Downloader 自动回退官方地址。
             String mirror = VersionManager.BMCLAPI_BASE + "/assets/" + sub + "/" + hash;
-            tasks.add(new DownloadTask(List.of(official, mirror), dest, hash, size));
+            String official = "https://resources.download.minecraft.net/" + sub + "/" + hash;
+            tasks.add(new DownloadTask(List.of(mirror, official), dest, hash, size));
             totalSize.addAndGet(size);
         }
         Log.info("资源文件待下载 " + tasks.size() + " 个，共 "

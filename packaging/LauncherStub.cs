@@ -66,6 +66,7 @@ static class Program
             string mainJar = Path.Combine(appDir, "SimpleMCLauncher.jar");
             string fxPath = string.Join(";", Directory.GetFiles(appDir, "javafx-*.jar"));
             string dataDir = Path.Combine(exeDir, "pyLauncher");
+            string jreDir = Path.Combine(cacheRoot, "jre");
 
             var sb = new StringBuilder();
             sb.Append("-Dfile.encoding=UTF-8 ");
@@ -73,6 +74,8 @@ static class Program
             sb.Append("-XX:+UseSerialGC ");
             sb.Append("\"-Dscl.app.dir=").Append(exeDir).Append("\" ");
             sb.Append("\"-Dscl.data.dir=").Append(dataDir).Append("\" ");
+            // 告诉启动器自带的 JRE 在哪；用户没装 Java 时游戏要用它
+            sb.Append("\"-Dscl.jre.dir=").Append(jreDir).Append("\" ");
             sb.Append("--module-path \"").Append(fxPath).Append("\" ");
             sb.Append("--add-modules javafx.controls,javafx.graphics,javafx.base ");
             sb.Append("-cp \"").Append(mainJar).Append("\" ");

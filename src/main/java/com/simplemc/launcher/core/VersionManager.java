@@ -53,15 +53,24 @@ public final class VersionManager {
             return cachedAll;
         }
         JsonNode manifest = null;
-        // 先试国内镜像
+        Exception mirrorErr = null;
+        // 镜像优先（国内更快）
         try {
             manifest = Http.fetchJson(BMCLAPI_MANIFEST);
         } catch (Exception e) {
+            mirrorErr = e;
             Log.warn("BMCLAPI 清单失败: " + e.getMessage());
         }
         if (manifest == null) {
             // 退回官方
-            manifest = Http.fetchJson(MOJANG_MANIFEST);
+            try {
+                manifest = Http.fetchJson(MOJANG_MANIFEST);
+            } catch (Exception e) {
+                if (mirrorErr != null) {
+                    Log.error("两个清单源都失败", e);
+                }
+                throw e;
+            }
         }
 
         List<VersionInfo> list = new ArrayList<>();
