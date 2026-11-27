@@ -12,7 +12,7 @@ public final class Constants {
 
     public static final String APP_NAME = "极简 MC 启动器";
     public static final String APP_TITLE = "极简 MC 启动器";
-    public static final String VERSION = "v5.2.5";
+    public static final String VERSION = "v5.2.6";
 
     public static final String REPO_OWNER = "BoscoWu";
     public static final String REPO_NAME = "Simple-Minecraft-Launcher-SCL-";
@@ -20,9 +20,14 @@ public final class Constants {
     /**
      * GitHub 加速镜像（已剔除会跳广告站的 ghps.cc）。
      *
-     * <p>顺序按 2026-11 实测的 releases/download 可用性排列：
-     * ghfast.top 最快且稳定，ghproxy.net 慢但可用，
-     * gh-proxy.com 对 download 路径返回 403 所以排最后作兜底。</p>
+     * <p>这些镜像对<b>不同路径的支持不一致</b>，所以要分两个列表用：</p>
+     * <ul>
+     *   <li>{@link #GH_MIRRORS_API} 查 releases 元数据（走 api.github.com）</li>
+     *   <li>{@link #GH_MIRRORS} 下载文件（走 releases/download）</li>
+     * </ul>
+     *
+     * <p>本列表用于<b>文件下载</b>，顺序按 2026-11 实测的
+     * releases/download 可用性排列。</p>
      */
     public static final String[] GH_MIRRORS = {
         "https://ghfast.top/",
@@ -30,10 +35,28 @@ public final class Constants {
         "https://gh-proxy.com/",
     };
 
+    /**
+     * 能代理 {@code api.github.com} 的镜像，用于检查更新。
+     *
+     * <p>实测（2026-11）：gh-proxy.com 可用且返回实时数据；
+     * ghfast.top / ghproxy.net 对 API 返回 403。
+     * 排第一的是最可靠的。</p>
+     */
+    public static final String[] GH_MIRRORS_API = {
+        "https://gh-proxy.com/",
+        "https://ghfast.top/",
+        "https://ghproxy.net/",
+    };
+
     /** 黑名单镜像：无论如何都不使用 */
     public static final String[] MIRROR_BLACKLIST = { "ghps.cc" };
 
-    /** 更新检查用的第三方 GitHub 数据代理（绕过 api.github.com 被阻断/403 的问题） */
+    /**
+     * 第三方 GitHub 数据代理。
+     *
+     * <p><b>仅作兜底</b>：实测它有数小时的缓存延迟，
+     * 会漏报新版本，不能当主渠道。</p>
+     */
     public static final String UNGH_API = "https://ungh.cc/repos";
 
     public static final String USER_AGENT = "SimpleMCLauncher/" + VERSION;

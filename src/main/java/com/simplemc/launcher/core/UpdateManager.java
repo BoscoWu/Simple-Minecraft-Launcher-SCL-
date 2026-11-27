@@ -37,53 +37,52 @@ public final class UpdateManager {
     /**
      * 检查更新。
      *
-     * <p>顺序很重要：<b>先试不需要镜像的第三方 API 代理</b>，
-     * 再试镜像 + api.github.com，最后才试直连。</p>
-     *
-     * <p>为什么不能只靠镜像：实测 gh-proxy / ghproxy.net / ghfast.top
-     * 访问 {@code api.github.com} 全部返回 403（它们只代理
-     * releases/download 这类文件路径，不代理 API）。
-     * 而直连 {@code api.github.com} 在部分网络下是 SSL 阻断。
-     * 所以主路径改用 ungh.cc —— 它把 GitHub 的 release 数据转成
-     * 简洁 JSON，且返回标准的 downloadUrl，可直接交给下载器。</p>
+     * <p>按可靠性依次尝试，<b>任何一个拿到 tag_name 就返回</b>：</p>
+     * <ol>
+     *   <li>镜像 + api.github.com —— 数据最准（ungh.cc 有缓存，
+     *       实测会落后好几个版本，不能当主渠道）</li>
+     *   <li>直连 api.github.com</li>
+     *   <li>ungh.cc —— 兜底，但要对缓存做校验</li>
+     * </ol>
      */
     public static CheckResult check() {
-        Exception last = null;
-
-        // ---- 路径 1：ungh.cc（第三方 GitHub 数据代理，实测最快最稳）----
-        try {
-            CheckResult r = checkViaUngh();
-            if (r != null) return r;
-        } catch (Exception e) {
-            last = e;
-            Log.warn("ungh.cc 检查失败: " + e.getMessage());
-        }
-
-        // ---- 路径 2：镜像 + api.github.com ----
         String apiPath = "https://api.github.com/repos/"
                 + Constants.REPO_OWNER + "/" + Constants.REPO_NAME + "/releases/latest";
-        for (String mirror : Constants.GH_MIRRORS) {
+
+        // ---- 路径 1：镜像 + GitHub API（首选，数据实时）----
+        for (String mirror : Constants.GH_MIRRORS_API) {
             try {
                 JsonNode release = Http.fetchJson(mirror + apiPath,
-                        Duration.ofSeconds(10), null);
+                        Duration.ofSeconds(12), null);
                 if (release != null && release.has("tag_name")) {
+                    Log.info("更新检查来源: " + mirror);
                     return fromGithubRelease(release);
                 }
             } catch (Exception e) {
-                last = e;
                 Log.warn("镜像 API 失败 " + mirror + ": " + shortMsg(e));
             }
         }
 
-        // ---- 路径 3：直连 api.github.com ----
+        // ---- 路径 2：直连 ----
         try {
             JsonNode release = Http.fetchJson(apiPath, Duration.ofSeconds(12), null);
             if (release != null && release.has("tag_name")) {
+                Log.info("更新检查来源: 直连 api.github.com");
                 return fromGithubRelease(release);
             }
         } catch (Exception e) {
-            last = e;
             Log.warn("直连 API 失败: " + shortMsg(e));
+        }
+
+        // ---- 路径 3：ungh.cc（有缓存延迟，仅兜底）----
+        try {
+            CheckResult r = checkViaUngh();
+            if (r != null) {
+                Log.info("更新检查来源: ungh.cc（可能滞后）");
+                return r;
+            }
+        } catch (Exception e) {
+            Log.warn("ungh.cc 检查失败: " + shortMsg(e));
         }
 
         Log.warn("检查更新失败: 所有渠道均不可用");
